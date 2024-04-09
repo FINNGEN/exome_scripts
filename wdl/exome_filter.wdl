@@ -7,17 +7,15 @@ workflow exome_filter {
     String docker
     Boolean test
     File mapping
+    File variants
   }
 
-  Array[Array[String]] chrom_list = read_tsv(chrom_file_list)
-  Array[Array[String]] final_list = chrom_list
-  # subset to test scenario
-
-  Int cpus = 8
-  Int mem = 16
   Int disk_factor = 4
-  
-  Array[Array[String]] final_list =  [chrom_list[23]] 
+
+  Array[Array[String]] chrom_list = read_tsv(chrom_file_list)
+  # subset to test scenario
+  #Array[Array[String]] final_list = chrom_list
+  Array[Array[String]] final_list =  [chrom_list[20],chrom_list[23]] 
   scatter (elem in final_list){
     call chrom_convert {
       input :
@@ -27,7 +25,8 @@ workflow exome_filter {
       docker = docker,
       chrom = elem[0],
       cFile = elem[1],
-      cpus = cpus,mem=mem,disk_factor = disk_factor
+      variants = variants,
+      disk_factor = disk_factor
     }
     call bgen_plink {
       input :
@@ -35,7 +34,8 @@ workflow exome_filter {
       vcf = chrom_convert.vcf,
       chrom = elem[0],
       name = name,
-      cpus = cpus,mem=mem,disk_factor = disk_factor +1
+      variants = variants,
+      disk_factor = disk_factor +1
     }
   }
 }
@@ -50,20 +50,19 @@ task bgen_plink {
     File variants
     String chrom
     String name
-    Int cpu
-    Int mem
     Int disk_factor
   }
   File tbi = vcf +'.tbi'
-  
-  Int disk_size = disk_factor * ceil(size(vcf,"GB")) + 50
+  Int vcf_size = ceil(size(vcf,"GB"))
+  Int disk_size = disk_factor *vcf_size  + 50
+  Int cpu =  8 + 8*(vcf_size/30) + 16*(vcf_size/100)
   String name_chrom =  name + "_" + chrom
 
   command <<<
   zcat -f  ~{variants} | sed 's/chrX/chr23/g' | sed 's/chrY/chr24/g' | grep chr~{chrom}_ | sed 's/chr23/chrX/g' | sed 's/chr24/chrY/g'   > ./variants.txt
    head ./variants.txt
 
-   python3 /Scripts/annotate.py  --cFile ~{vcf} --tbiFile ~{tbiFile}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --split   -pb  --bargs ~{bargs} --pargs ~{pargs} | tee  chrom_convert_~{name_chrom}.log        
+   python3 /Scripts/annotate.py  --cFile ~{vcf} --tbiFile ~{tbi}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --split   -pb  --bargs ~{bargs} --pargs ~{pargs} | tee  chrom_convert_~{name_chrom}.log        
   df -h >> chrom_convert_~{name_chrom}.log
   >>>
   runtime {
@@ -77,14 +76,18 @@ task bgen_plink {
   }
 
   output {
-    File out_bgen = "/cromwell_root/${name_chrom}/${name_chrom}.bgen"
-    File out_bgen_sample = "/cromwell_root/${name_chrom}/${name_chrom}.bgen.sample"
-    File out_bgen_index = "/cromwell_root/${name_chrom}/${name_chrom}.bgen.bgi"
-    File out_chrom_convert_log  = "chrom_convert_${name_chrom}.log"
-    Array[File] logs = glob("/cromwell_root/${name_chrom}/logs/*")
+    # BGEN
+    File bgen = "/cromwell_root/${name_chrom}/${name_chrom}.bgen"
+    File bgen_sample = "/cromwell_root/${name_chrom}/${name_chrom}.bgen.sample"
+    File bgen_index = "/cromwell_root/${name_chrom}/${name_chrom}.bgen.bgi"
+    # PLINK
     File bed = "/cromwell_root/${name_chrom}/${name_chrom}.bed"
     File bim = "/cromwell_root/${name_chrom}/${name_chrom}.bim"
     File fam = "/cromwell_root/${name_chrom}/${name_chrom}.fam"
+    # LOGS
+    File bgen_plink_convert_log  = "chrom_convert_${name_chrom}.log"
+    Array[File] logs = glob("/cromwell_root/${name_chrom}/logs/*")
+
   }
 }
 
@@ -100,12 +103,14 @@ task chrom_convert {
     String docker
     String vargs
     String name
-    Int cpu
-    Int mem
+    Int cpu =  8 + 8*(vcf_size/30) + 16*(vcf_size/100)
+
     Int disk_factor
   }
 
-  Int disk_size = disk_factor * ceil(size(cFile,"GB")) + 50
+  Int vcf_size = ceil(size(cFile,"GB"))
+  Int disk_size = disk_factor *vcf_size  + 50
+  Int cpu =  8 + 8*(vcf_size/20) + 16*(vcf_size/60) #8/16/32 cpus based on size
   String name_chrom =  name + "_" + chrom
   File tbiFile = cFile + '.tbi'
   command <<<
@@ -130,10 +135,10 @@ task chrom_convert {
   
   runtime {
     docker: "~{docker}"
-    cpu: "~{cpus}"
+    cpu: "~{cpu}"
     disks: "local-disk ~{disk_size} HDD"
     zones: "europe-west1-b europe-west1-c europe-west1-d"
-    memory:  "~{mem} GB"
+    memory:  "~{cpu} GB"
     preemptible: 1
   }
   output {
