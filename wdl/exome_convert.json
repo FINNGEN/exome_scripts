@@ -1,0 +1,14 @@
+{
+    "exome_convert.test": false,
+    "exome_convert.name": "exome",
+    "exome_convert.docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
+    "exome_convert.chrom_file_list": "gs://r12-data/exome/inputs/input_list_test.txt",
+    "exome_convert.chrom_convert.missingness": " \" 'FORMAT/DP<10 | FORMAT/GQ < 20 ' \" ",
+    "exome_convert.chrom_convert.vargs": " \" -i 'AC>0 ' \" ",
+
+    "exome_convert.chrom_convert.variants": "gs://r12-data/exome/inputs/variants.txt.gz",
+    
+    #"exome_convert.chrom_convert.bargs":  "  ' -bgen-bits 8 -bgen-compression zlib -bgen-permitted-input-rounding-error 0.005 -ofiletype \"bgen_v1.2\"  '",
+    #"exome_convert.chrom_convert.pargs": " '  --keep-allele-order --double-id --mac 1 ' ",
+}
+

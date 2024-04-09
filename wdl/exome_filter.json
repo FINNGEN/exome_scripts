@@ -1,0 +1,11 @@
+{
+    "exome_filter.test": false,
+    "exome_filter.name": "exome",
+    "exome_filter.mapping": "gs://r12-data/exome/inputs/final_mapping.txt",
+    "exome_filter.docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
+    "exome_filter.chrom_file_list": "gs://r12-data/exome/inputs/rename_input.txt",
+    "exome_filter.chrom_convert.vargs": " \" -i 'AC>0 ' \" ",
+    "exome_filter.chrom_convert.variants": "gs://r12-data/exome/inputs/variants.txt.gz",
+
+}
+
