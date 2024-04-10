@@ -14,8 +14,8 @@ workflow exome_convert {
 
   Array[Array[String]] chrom_list = read_tsv(chrom_file_list)
   # subset to test scenario
-  #Array[Array[String]] final_list = chrom_list
-  Array[Array[String]] final_list =  [chrom_list[20],chrom_list[23]] 
+  Array[Array[String]] final_list = chrom_list
+  #Array[Array[String]] final_list =  [chrom_list[20],chrom_list[23]] 
   scatter (elem in final_list){
     call chrom_convert {
       input :

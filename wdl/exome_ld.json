@@ -3,5 +3,6 @@
     "exome_ld.exome_vcf_files": "gs://r12-data/exome/inputs/ld/exome_vcfs.txt",
     "exome_ld.fg_vcf_files": "gs://r12-data/exome/inputs/ld/finngen_vcfs.txt",
     "exome_ld.filter_fg_plink.pargs": " --double-id --allow-extra-chr --max-alleles 2  ",
+    "exome_ld.ld.ld_params" : "--ld-window 10 --ld-window-kb 1000 --ld-window-r2 0.3 ",
 }
 

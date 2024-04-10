@@ -27,10 +27,40 @@ workflow exome_ld {
     call merge_files {
       input:docker = docker,exome_files=exome_files,fg_files=fg_files,chrom=chrom
     }
+    call ld {
+      input: docker = docker,chrom=chrom,plink_files = [merge_files.bed,merge_files.bim,merge_files.fam]
+    }
   }
 }
 
 
+task ld {
+  input {
+    String docker
+    Array[File] plink_files
+    String ld_params
+    String chrom
+  }
+
+  Int disk_size = ceil(size(plink_files,"GB"))*2
+  Int cpus = 8
+  String out_root = "exome_finngen_ld_" + chrom
+  command <<<
+  plink --bfile ~{sub(plink_files[0],".bed","")} --r2 ~{ld_params} --out ~{out_root}
+  >>>
+  runtime {
+    docker: "${docker}"
+    cpu: "${cpus}"
+    disks: "local-disk " + "${disk_size}" + " HDD"
+    bootDiskSizeGb: 20
+    zones: "europe-west1-b europe-west1-c europe-west1-d"
+    memory:  "${cpus} GB"
+    preemptible: 1
+  }
+  output {
+    File ld         = "~{out_root}.ld"
+  }
+}
 
 task merge_files {
   input {
@@ -44,7 +74,9 @@ task merge_files {
   Int disk_size = ceil(size(exome_files,"GB") + size(fg_files,"GB"))*4+10
   Int cpus = 8
   command <<<
-  plink2 --bfile ~{sub(exome_files[0],".bed","")} --pmerge ~{sub(fg_files[0],".bed","")} --make-bed --out ~{out_root}
+  plink --bfile ~{sub(exome_files[0],".bed","")} --bmerge ~{sub(fg_files[0],".bed","")} --make-bed --out ~{out_root}
+  plink2 --bfile ~{out_root} --make-just-fam --out tmp
+  mv tmp.fam ~{out_root}.fam
   >>>
   runtime {
     docker: "${docker}"
