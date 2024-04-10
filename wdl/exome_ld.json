@@ -1,0 +1,7 @@
+{
+    "exome_ld.docker": "eu.gcr.io/finngen-refinery-dev/bioinformatics:0.7",    
+    "exome_ld.exome_vcf_files": "gs://r12-data/exome/inputs/ld/exome_vcfs.txt",
+    "exome_ld.fg_vcf_files": "gs://r12-data/exome/inputs/ld/finngen_vcfs.txt",
+    "exome_ld.filter_fg_plink.pargs": " --double-id --allow-extra-chr --max-alleles 2  ",
+}
+
