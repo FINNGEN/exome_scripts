@@ -5,6 +5,7 @@
     "exome_convert.mapping": "gs://r12-data/exome/inputs/convert/final_mapping.txt",
     "exome_convert.chrom_file_list": "gs://r12-data/exome/inputs/convert/rename_input.txt",
     "exome_convert.variants": "gs://r12-data/exome/inputs/variants.txt.gz",
+    "exome_convert.bgen_plink.min_pheno": "gs://finngen-production-library-red/finngen_R12/phenotype_1.0/data/finngen_R12_minimum_1.0.txt.gz",
 
 
     "exome_convert.chrom_convert.vargs": " \" -i 'AC>=1 ' \" ",

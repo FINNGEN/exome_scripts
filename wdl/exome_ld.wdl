@@ -4,11 +4,11 @@ version development
 workflow exome_ld {
   input {
     String docker
-    File exome_vcf_files
+    File exome_bed_files
     File fg_vcf_files
   }
 
-  Array[Array[String]] inputs = read_tsv(exome_vcf_files)
+  Array[Array[String]] inputs = read_tsv(exome_bed_files)
   Map[String,File] vcf_map = read_map(fg_vcf_files)
   scatter (elem in inputs) {
     String chrom = elem[0]

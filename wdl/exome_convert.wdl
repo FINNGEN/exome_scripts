@@ -8,14 +8,14 @@ workflow exome_convert {
     Boolean test
     File mapping
     File variants
+    
   }
 
-  Int disk_factor = 4
-
+  Int disk_factor = 5
   Array[Array[String]] chrom_list = read_tsv(chrom_file_list)
   # subset to test scenario
   Array[Array[String]] final_list = chrom_list
-  #Array[Array[String]] final_list =  [chrom_list[20],chrom_list[23]] 
+  #Array[Array[String]] final_list =  [chrom_list[22],chrom_list[23]] 
   scatter (elem in final_list){
     call chrom_convert {
       input :
@@ -52,6 +52,7 @@ task bgen_plink {
     String chrom
     String name
     Int disk_factor
+    File min_pheno
   }
   File tbi = vcf +'.tbi'
   Int vcf_size = ceil(size(vcf,"GB"))
@@ -61,9 +62,17 @@ task bgen_plink {
 
   command <<<
   zcat -f  ~{variants} | sed 's/chrX/chr23/g' | sed 's/chrY/chr24/g' | grep chr~{chrom}_ | sed 's/chr23/chrX/g' | sed 's/chr24/chrY/g'   > ./variants.txt
-   head ./variants.txt
+  head ./variants.txt
 
-   python3 /Scripts/annotate.py  --cFile ~{vcf} --tbiFile ~{tbi}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --split   -pb  --bargs ~{bargs} --pargs ~{pargs} | tee  chrom_convert_~{name_chrom}.log        
+  # NEEDED FOR CHR23/PAR
+  # get SEX COL ID
+  COL=$(zcat ~{min_pheno} | head -n1 | tr '\t' '\n' | grep -n SEX | cut -d : -f 1)
+  zcat ~{min_pheno} | cut -f 1,$COL | sed -E 1d | sort > sex_info.txt
+  bcftools query -l ~{vcf} > samples.txt
+  # BUILD SEX UPDATE
+  echo -e "FID\tIID\tSEX" > sex_update.txt  && join <(sort samples.txt) sex_info.txt | awk '{print $1"\t"$1"\t"$2}' >> sex_update.txt
+
+  python3 /Scripts/annotate.py  --cFile ~{vcf} --tbiFile ~{tbi}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --split   -pb  --bargs ~{bargs} --pargs ~{pargs} --pconvargs  ' --update-sex sex_update.txt  --split-par b38 '  | tee  chrom_convert_~{name_chrom}.log        
   df -h >> chrom_convert_~{name_chrom}.log
   >>>
   runtime {
