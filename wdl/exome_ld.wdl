@@ -4,16 +4,17 @@ version development
 workflow exome_ld {
   input {
     String docker
-    File exome_bed_files
-    File fg_vcf_files
+    File exome_beds
+    File finngen_vcfs
   }
-
-  Array[Array[String]] inputs = read_tsv(exome_bed_files)
-  Map[String,File] vcf_map = read_map(fg_vcf_files)
+  # READ IN ALL EXOME BEDS
+  Array[Array[String]] inputs = read_tsv(exome_beds)
+  # MAP TO ALL VCFS, SO I CAN WORK WITH SUBSET IF NEEDED
+  Map[String,File] vcf_map = read_map(finngen_vcfs)
   scatter (elem in inputs) {
     String chrom = elem[0]
     String exome_plink_root = sub(elem[1],".bed","")
-    # subset FG data only to exome samples (after renaming exome data to FG ids)
+    # subset FG data only to exome samples (exome data must have been renamed)
     call filter_fg_plink{
       input : docker = docker,chrom = chrom,vcf = vcf_map[chrom],exome_plink_root = exome_plink_root
     }
@@ -28,7 +29,7 @@ workflow exome_ld {
       input:docker = docker,exome_files=exome_files,fg_files=fg_files,chrom=chrom
     }
     call ld {
-      input: docker = docker,chrom=chrom,plink_files = [merge_files.bed,merge_files.bim,merge_files.fam]
+      input: docker = docker,chrom=chrom,plink_files = [merge_files.bed,merge_files.bim,merge_files.fam],exome_bim = exome_files[1],finngen_bim = fg_files[1]
     }
   }
 }
@@ -38,6 +39,8 @@ task ld {
   input {
     String docker
     Array[File] plink_files
+    File exome_bim
+    File finngen_bim
     String ld_params
     String chrom
   }
@@ -46,13 +49,18 @@ task ld {
   Int cpus = 8
   String out_root = "exome_finngen_ld_" + chrom
   command <<<
-  plink --bfile ~{sub(plink_files[0],".bed","")} --r2 ~{ld_params} --out ~{out_root}
+  # calculate R2 only for exome variants
+  plink2 --bfile ~{sub(plink_files[0],'.bed','')} --r2-unphased ~{ld_params} --ld-snp-list ~{exome_bim} --out ld
+  echo -e "EXOME_SNP\tFINNGEN_SNP\tR2" > ~{out_root}.ld
+  # join over FG variants
+  join -1 2 <(cut -f 3,6,7 ld.vcor | sort -k2 ) <(cut -f2 ~{finngen_bim} | sort ) | awk '{ print $2"\t"$1"\t"$3}' | sort -k1 >> ~{out_root}.ld
+  
   >>>
+
   runtime {
     docker: "${docker}"
     cpu: "${cpus}"
     disks: "local-disk " + "${disk_size}" + " HDD"
-    bootDiskSizeGb: 20
     zones: "europe-west1-b europe-west1-c europe-west1-d"
     memory:  "${cpus} GB"
     preemptible: 1
@@ -138,7 +146,7 @@ task filter_fg_plink {
   File exome_fam = exome_plink_root + ".fam"
   Int disk_size = ceil(size(vcf,"GB"))*4
   Int cpus = 8
-  String out_root = "finngen_exome_" + chrom
+  String out_root = "finngen_exome_samples_" + chrom
   command <<<
   plink2 --vcf ~{vcf}  ~{pargs}  --keep ~{exome_fam} --make-bed --out ~{out_root}
   >>>
