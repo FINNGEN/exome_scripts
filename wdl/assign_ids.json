@@ -3,7 +3,7 @@
     "assign_ids.ex_samples": "gs://r12-data/exome/inputs/assign/exome_merged.fam",
     
     "assign_ids.fg_samples": "gs://r12-data/fgfactory_pass_samples/R12_fgfactory_pass_samples.txt",
-    "assign_ids.dup_list": "gs://r12-data/exome/kinship/inputs/finngen_R12_duplicate_list.txt",
-    "assign_ids.kin": "gs://r12-data/exome/kinship/inputs/exome.kin"
+    "assign_ids.dup_list": "gs://r12-data/exome/inputs/assign/finngen_R12_duplicate_list.txt",
+    "assign_ids.kin": "gs://r12-data/exome/inputs/assign/exome.kin"
 }
 
