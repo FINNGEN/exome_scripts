@@ -17,13 +17,15 @@ workflow exome_convert {
   Array[Array[String]] final_list = chrom_list
   #Array[Array[String]] final_list =  [chrom_list[0]] 
   scatter (elem in final_list){
+    String chrom = elem[0]
+    
     call chrom_convert {
       input :
       name = name,
       test=test,
       mapping = mapping,
       docker = docker,
-      chrom = elem[0],
+      chrom = chrom,
       cFile = elem[1],
       variants = variants,
       disk_factor = disk_factor
@@ -35,7 +37,7 @@ workflow exome_convert {
       chrom = elem[0],
       name = name,
       variants = variants,
-      disk_factor = disk_factor +2
+      disk_factor = if chrom =="1" then disk_factor + 6 else disk_factor +3 
     }
   }
 }
