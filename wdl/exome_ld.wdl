@@ -11,6 +11,8 @@ workflow exome_ld {
   Array[Array[String]] inputs = read_tsv(exome_beds)
   # MAP TO ALL VCFS, SO I CAN WORK WITH SUBSET IF NEEDED
   Map[String,File] vcf_map = read_map(finngen_vcfs)
+
+  Array[Array[String]] final_inputs = [inputs[22]]
   scatter (elem in inputs) {
     String chrom = elem[0]
     String exome_plink_root = sub(elem[1],".bed","")
@@ -82,7 +84,7 @@ task merge_files {
   Int disk_size = ceil(size(exome_files,"GB") + size(fg_files,"GB"))*4+10
   Int cpus = 8
   command <<<
-  plink --bfile ~{sub(exome_files[0],".bed","")} --bmerge ~{sub(fg_files[0],".bed","")} --make-bed --out ~{out_root}
+  plink --bfile ~{sub(exome_files[0],".bed","")} --bmerge ~{sub(fg_files[0],".bed","")} --make-bed --out ~{out_root} --allow-extra-chr
   plink2 --bfile ~{out_root} --make-just-fam --out tmp
   mv tmp.fam ~{out_root}.fam
   >>>
@@ -142,13 +144,20 @@ task filter_fg_plink {
     File vcf
     String exome_plink_root
     String pargs
+    File min_pheno
   }
   File exome_fam = exome_plink_root + ".fam"
   Int disk_size = ceil(size(vcf,"GB"))*4
   Int cpus = 8
   String out_root = "finngen_exome_samples_" + chrom
   command <<<
-  plink2 --vcf ~{vcf}  ~{pargs}  --keep ~{exome_fam} --make-bed --out ~{out_root}
+  COL=$(zcat ~{min_pheno} | head -n1 | tr '\t' '\n' | grep -n SEX | cut -d : -f 1)
+  zcat ~{min_pheno} | cut -f 1,$COL | sed -E 1d | sort > sex_info.txt
+  bcftools query -l ~{vcf} > samples.txt
+  # BUILD SEX UPDATE
+  echo -e "FID\tIID\tSEX" > sex_update.txt  && join <(sort samples.txt) sex_info.txt | awk '{print $1"\t"$1"\t"$2}' >> sex_update.txt
+  
+  plink2 --vcf ~{vcf}  ~{pargs}  --keep ~{exome_fam} --make-bed --out ~{out_root} --update-sex sex_update.txt  --split-par b38
   >>>
 
   runtime {

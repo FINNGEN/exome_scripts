@@ -43,7 +43,6 @@ workflow exome_convert {
 }
 
 
-
 task bgen_plink {
   input {
     String docker
@@ -63,6 +62,7 @@ task bgen_plink {
   String name_chrom =  name + "_" + chrom
 
   command <<<
+  echo ~{disk_factor}
   zcat -f  ~{variants} | sed 's/chrX/chr23/g' | sed 's/chrY/chr24/g' | grep chr~{chrom}_ | sed 's/chr23/chrX/g' | sed 's/chr24/chrY/g'   > ./variants.txt
   head ./variants.txt
 
