@@ -1,16 +1,17 @@
 {
-    "exome_convert.test": false,
+    "exome_convert.test": true,
     "exome_convert.name": "finngen_wes_gnomad_v4_renamed",
     "exome_convert.docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
     "exome_convert.mapping": "gs://fg-3/exome/inputs/convert/final_mapping.txt",
-    "exome_convert.chrom_file_list": "gs://fg-3/exome/inputs/convert/rename_input.txt",
-    "exome_convert.variants": "gs://fg-3/exome/inputs/variants.txt.gz",
-    "exome_convert.bgen_plink.min_pheno": "gs://finngen-production-library-red/finngen_R12/phenotype_1.0/data/finngen_R12_minimum_1.0.txt.gz",
+    "exome_convert.chrom_file_list": "gs://fg-3/exome/inputs/convert/test.txt",
+    #VCF
+    "exome_convert.chrom_convert.vargs": " -i 'AC>=1 ' ",
 
-
-    "exome_convert.chrom_convert.vargs": " \" -i 'AC>=1 ' \" ",
-    "exome_convert.bgen_plink.bargs": " ' -bgen-bits 8 -bgen-compression zlib -bgen-permitted-input-rounding-error 0.005 -ofiletype \"bgen_v1.2\" ' ",
-    "exome_convert.bgen_plink.pargs": " '  --keep-allele-order --double-id --mac 1 ' ",
+    #PLINK
+    "exome_convert.plink.min_pheno": "gs://finngen-production-library-red/finngen_R12/phenotype_1.0/data/finngen_R12_minimum_1.0.txt.gz",
+    "exome_convert.plink.pargs": "  --keep-allele-order --double-id  ",
+    #BARGS
+    "exome_convert.bgen.bargs": "  -bgen-bits 8 -bgen-compression zlib -bgen-permitted-input-rounding-error 0.005 -ofiletype \"bgen_v1.2\"  ",
 
 }
 
