@@ -1,7 +1,6 @@
 {
     "exome_convert.test": true,
     "exome_convert.name": "finngen_wes_gnomad_v4_renamed",
-    "exome_convert.docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
     "exome_convert.mapping": "gs://fg-3/exome/inputs/convert/final_mapping.txt",
     "exome_convert.chrom_file_list": "gs://fg-3/exome/inputs/convert/test.txt",
     #VCF

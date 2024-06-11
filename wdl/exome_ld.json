@@ -1,5 +1,4 @@
 {
-    "exome_ld.docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
     "exome_ld.exome_beds": "gs://fg-3/exome/inputs/ld/exome_beds.txt",
     "exome_ld.finngen_vcfs": "gs://fg-3/exome/inputs/ld/finngen_vcfs.txt",
 

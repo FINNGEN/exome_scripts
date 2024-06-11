@@ -76,12 +76,10 @@ task plink {
 
   >>>
   runtime {
-    docker: "${docker}"
     cpu: "${cpu}"
     disks: "local-disk ${disk_size} HDD"
     memory: "${cpu}  GB"
-    zones: "europe-west1-b europe-west1-c europe-west1-d"
-    preemptible: 0
+    preemptible: 1
   }
 
   output {
@@ -113,12 +111,10 @@ task bgen {
   bgenix -g  ~{name_chrom}.bgen -clobber -index
   >>>
   runtime {
-    docker: "${docker}"
     cpu: "${cpu}"
     disks: "local-disk ${disk_size} HDD"
     memory: "${cpu}  GB"
-    zones: "europe-west1-b europe-west1-c europe-west1-d"
-    preemptible: 0
+    preemptible: 1
   }
 
   output {
@@ -165,17 +161,14 @@ task chrom_convert {
   >>>
   
   runtime {
-    docker: "~{docker}"
     cpu: "~{cpu}"
     disks: "local-disk ~{disk_size} HDD"
-    zones: "europe-west1-b europe-west1-c europe-west1-d"
     memory:  "~{cpu} GB"
     preemptible: 1
   }
   output {
-    File chrom_convert_log  = "chrom_convert_${name_chrom}.log"
-    File vcf     = "/cromwell_root/~{name_chrom}.vcf.gz"
-    File tbi      = "/cromwell_root/~{name_chrom}.vcf.gz.tbi"
+    File vcf = "/cromwell_root/~{name_chrom}.vcf.gz"
+    File tbi = "/cromwell_root/~{name_chrom}.vcf.gz.tbi"
   }
 }
 
