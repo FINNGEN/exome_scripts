@@ -4,7 +4,6 @@ workflow exome_annotate {
   input{
     File chrom_file_list
     String name
-    String docker
     Boolean test
   }
   Int cpus =64
@@ -20,7 +19,6 @@ workflow exome_annotate {
       input :
       name = name,
       test=test,
-      docker = docker,
       chrom = elem[0],
       cFile = elem[1],
       cpus = cpus,mem = mem,disk_factor = disk_factor
@@ -34,7 +32,6 @@ task chrom_convert {
     String chrom
     File cFile
     File variants
-    String docker
     String missingness
     String vargs
     String name
@@ -59,10 +56,8 @@ task chrom_convert {
   >>>
   
   runtime {
-    docker: "~{docker}"
     cpu: "~{cpus}"
     disks: "local-disk ~{disk_size} HDD"
-    zones: "europe-west1-b europe-west1-c europe-west1-d"
     memory:  "~{mem} GB"
     preemptible: 1
   }

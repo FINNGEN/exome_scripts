@@ -5,7 +5,7 @@
     "exome_ld.filter_fg_plink.min_pheno": "gs://finngen-production-library-red/finngen_R12/phenotype_1.0/data/finngen_R12_minimum_1.0.txt.gz",
 
     "exome_ld.filter_fg_plink.pargs": " --double-id --allow-extra-chr --max-alleles 2  ",
-    "exome_ld.ld.ld_params" : "--ld-window 10 --ld-window-kb 1000 --ld-window-r2 0.2 ",
+    "exome_ld.ld.ld_params" : "--ld-window-kb 1000 --ld-window-r2 0.2 ",
 }
 
 

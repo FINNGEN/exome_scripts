@@ -4,7 +4,6 @@ workflow exome_convert {
   input{
     File chrom_file_list
     String name
-    String docker
     Boolean test
     File mapping
   }
@@ -22,14 +21,12 @@ workflow exome_convert {
       name = name,
       test=test,
       mapping = mapping,
-      docker = docker,
       chrom = chrom,
       cFile = elem[1],
       disk_factor = disk_factor
     }
     call plink {
       input :
-      docker = docker,
       vcf = chrom_convert.vcf,
       chrom = elem[0],
       name = name,
@@ -37,7 +34,6 @@ workflow exome_convert {
     }
     call bgen {
       input :
-      docker = docker,
       vcf = chrom_convert.vcf,
       chrom = elem[0],
       name = name,
@@ -50,7 +46,6 @@ workflow exome_convert {
 
 task plink {
   input {
-    String docker
     File vcf
     String pargs
     String chrom
@@ -84,16 +79,15 @@ task plink {
 
   output {
     # PLINK
-    File bed = "/cromwell_root/${name_chrom}/${name_chrom}.bed"
-    File bim = "/cromwell_root/${name_chrom}/${name_chrom}.bim"
-    File fam = "/cromwell_root/${name_chrom}/${name_chrom}.fam"
-    File freq = "/cromwell_root/${name_chrom}/${name_chrom}.afreq"
+    File bed  = "${name_chrom}.bed"
+    File bim  = "${name_chrom}.bim"
+    File fam  = "${name_chrom}.fam"
+    File freq = "${name_chrom}.afreq"
   }
 }
 
 task bgen {
   input {
-    String docker
     File vcf
     String bargs
     String chrom
@@ -107,7 +101,7 @@ task bgen {
   String name_chrom =  name + "_" + chrom
 
   command <<<
-  qctool -g ~{vcf} ~{bargs} -og ~{name_chrom}.bgen -os ~{name_chrom}.sample
+  qctool -g ~{vcf} ~{bargs} -og ~{name_chrom}.bgen -os ~{name_chrom}.bgen.sample
   bgenix -g  ~{name_chrom}.bgen -clobber -index
   >>>
   runtime {
@@ -119,9 +113,9 @@ task bgen {
 
   output {
     # BGEN
-    File bgen = "/cromwell_root/${name_chrom}/${name_chrom}.bgen"
-    File bgen_sample = "/cromwell_root/${name_chrom}/${name_chrom}.bgen.sample"
-    File bgen_index = "/cromwell_root/${name_chrom}/${name_chrom}.bgen.bgi"
+    File bgen        = "${name_chrom}.bgen"
+    File bgen_sample = "${name_chrom}.bgen.bgi"
+    File bgen_index  = "${name_chrom}.bgen.sample"
   }
 }
 
@@ -133,11 +127,9 @@ task chrom_convert {
     File mapping
     String chrom
     File cFile
-    String docker
     String vargs
     String name
     Int cpu =  8 + 8*(vcf_size/30) + 16*(vcf_size/100)
-
     Int disk_factor
   }
 
@@ -158,6 +150,7 @@ task chrom_convert {
   echo "REHEADER"
   bcftools reheader tmp.vcf.gz -s ~{mapping} > ~{name_chrom}.vcf.gz
   tabix ~{name_chrom}.vcf.gz
+  bcftools index -s ~{name_chrom}.vcf.gz
   >>>
   
   runtime {
