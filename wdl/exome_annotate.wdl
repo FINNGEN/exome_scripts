@@ -12,8 +12,7 @@ workflow exome_annotate {
 
   Array[Array[String]] chrom_list = read_tsv(chrom_file_list)
   Array[Array[String]] final_list = chrom_list
-  # subset to test scenario
-  #Array[Array[String]] final_list =  [chrom_list[22],chrom_list[23]] 
+  #Array[Array[String]] final_list =  [chrom_list[22],chrom_list[23]] # subset to test scenario
   scatter (elem in final_list){
     call chrom_convert {
       input :
@@ -45,13 +44,14 @@ task chrom_convert {
   String name_chrom =  name + "_" + chrom
   File tbiFile = cFile + '.tbi'
   command <<<
-   zcat -f  ~{variants} | sed 's/chrX/chr23/g' | sed 's/chrY/chr24/g' | grep chr~{chrom}_ | sed 's/chr23/chrX/g' | sed 's/chr24/chrY/g'   > ./variants.txt
-   head ./variants.txt
-
-   bcftools query -l  ~{cFile} ~{if test then " | head -n 10" else ""} > ./samples.txt
-   wc -l samples.txt
+  zcat -f  ~{variants} | sed 's/chrX/chr23/g' | sed 's/chrY/chr24/g' | grep chr~{chrom}_ | sed 's/chr23/chrX/g' | sed 's/chr24/chrY/g'   > ./variants.txt
+  head ./variants.txt
    
-   python3 /Scripts/annotate.py  --cFile ~{cFile} --tbiFile ~{tbiFile}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --variant-file ./variants.txt    -v   ~{if test then "--samples ./samples.txt" else ""}   --annotate "" --check-vcf  --set-missingness ~{missingness} --vargs ~{vargs} | tee  chrom_convert_~{name_chrom}.log        
+  bcftools query -l  ~{cFile} ~{if test then " | head -n 10" else ""} > ./samples.txt
+  wc -l samples.txt
+   
+  python3 /Scripts/annotate.py  --cFile ~{cFile} --tbiFile ~{tbiFile}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}  --split   -v   ~{if test then "--samples ./samples.txt" else ""}   --annotate "" --check-vcf  --set-missingness ~{missingness} --vargs ~{vargs} | tee  chrom_convert_~{name_chrom}.log        
+   
   df -h >> chrom_convert_~{name_chrom}.log
   >>>
   
