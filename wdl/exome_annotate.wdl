@@ -51,7 +51,7 @@ task chrom_convert {
    bcftools query -l  ~{cFile} ~{if test then " | head -n 10" else ""} > ./samples.txt
    wc -l samples.txt
    
-   python3 /Scripts/annotate.py  --cFile ~{cFile} --tbiFile ~{tbiFile}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --split    -v   ~{if test then "--samples ./samples.txt" else ""}   --annotate "" --check-vcf  --set-missingness ~{missingness} --vargs ~{vargs} | tee  chrom_convert_~{name_chrom}.log        
+   python3 /Scripts/annotate.py  --cFile ~{cFile} --tbiFile ~{tbiFile}  --oPath "/cromwell_root/"  --vcf-variants ./variants.txt  --name ~{name_chrom}   --variant-file ./variants.txt    -v   ~{if test then "--samples ./samples.txt" else ""}   --annotate "" --check-vcf  --set-missingness ~{missingness} --vargs ~{vargs} | tee  chrom_convert_~{name_chrom}.log        
   df -h >> chrom_convert_~{name_chrom}.log
   >>>
   

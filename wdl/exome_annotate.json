@@ -3,8 +3,7 @@
     "exome_annotate.name": "exome",
     "exome_annotate.chrom_file_list": "gs://r12-data/exome/inputs/annotate/input_list.txt",
     "exome_annotate.chrom_convert.missingness": " \" 'FORMAT/DP<10 | FORMAT/GQ < 20 ' \" ",
-    "exome_annotate.chrom_convert.vargs": " \" -i 'AC>0 ' \" ",
-
+    "exome_annotate.chrom_convert.vargs": " \" -i 'AC>0 & ALT!=\"*\"  ' \" ",
     "exome_annotate.chrom_convert.variants": "gs://r12-data/exome/inputs/variants.txt.gz",
     
 }
