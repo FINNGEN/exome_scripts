@@ -46,7 +46,7 @@ task ld {
     String chrom
   }
 
-  Int disk_size = ceil(size(plink_files,"GB"))*2
+  Int disk_size = ceil(size(plink_files,"GB"))*3
   Int cpus = 8
   String out_root = "exome_finngen_ld_" + chrom
   command <<<

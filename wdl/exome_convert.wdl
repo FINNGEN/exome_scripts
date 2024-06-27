@@ -11,11 +11,9 @@ workflow exome_convert {
   Int disk_factor = 3
   Array[Array[String]] chrom_list = read_tsv(chrom_file_list)
   # subset to test scenario
-  Array[Array[String]] final_list = chrom_list
-  #Array[Array[String]] final_list =  [chrom_list[0]] 
+  Array[Array[String]] final_list = if test then  [chrom_list[22],chrom_list[23]]  else chrom_list
   scatter (elem in final_list){
     String chrom = elem[0]
-    
     call chrom_convert {
       input :
       name = name,
@@ -127,6 +125,7 @@ task chrom_convert {
     File mapping
     String chrom
     File cFile
+    File norm_fasta
     String vargs
     String name
     Int cpu =  8 + 8*(vcf_size/30) + 16*(vcf_size/100)
@@ -144,7 +143,7 @@ task chrom_convert {
   cut -f1  ~{mapping} ~{if test then " | head -n 100" else ""} > ./samples.txt
   wc -l samples.txt
   # SUBSAMPLE AND ADD FILTERS
-  bcftools view ~{cFile} -S samples.txt -Ou | bcftools view ~{vargs} -Oz -o tmp.vcf.gz
+  bcftools view ~{cFile} -S samples.txt -Ou | bcftools view ~{vargs} -Ou | bcftools norm -f ~{norm_fasta} -c x -Ou| bcftools annotate --set-id '%CHROM\_%POS\_%REF\_%FIRST_ALT'   -Oz -o tmp.vcf.gz
   rm ~{cFile}
   # REHEADER
   echo "REHEADER"
