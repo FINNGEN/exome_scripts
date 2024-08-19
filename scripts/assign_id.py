@@ -79,7 +79,7 @@ with open(kinship_file) as i,open(out_rej,'wt') as rej:
         fg,_,ex_root,ex_full,kinship = line.strip().split()
         ex_full = ex_full.split("QRY_")[1]
         # so where we wanna skip who we fixed already
-        if kinship != "Dup/MZ" and fg == ex_root:
+        if kinship != "Dup/MZ" and fg == ex_root and fg not in tent_map:
             issue_dict[ex_full] = "SAME_ID_BUT_MISMATCH"
             
 
@@ -89,6 +89,7 @@ with open(kinship_file) as i :
         fg,_,ex_root,ex_full,kinship = line.strip().split()
         ex_full = ex_full.split("QRY_")[1]
         # so where we wanna skip who we fixed already
+        
         if kinship == "Dup/MZ" and ex_full not in id_mapping and ex_full not in issue_dict:
             assert fg!=ex_root
             # here we have a duplicat where
@@ -110,7 +111,10 @@ with open(kinship_file) as i :
                 label = f"_exdup{counts+1}" if counts >0  else ""
                 # now i update the mapping, adding label if needed        
                 id_mapping[ex_full] = candidate_map + label
-            
+
+            else:
+                issue_dict[ex_full] = "DUP_BUT_LACKING_ID_MAPPING"
+
 # write mapping to file (need to include dup)
 with open(exome_fam) as i: exome_samples = [elem.strip().split()[0] for elem in i.readlines()]
 with open(out_map,'wt') as acc,open(out_rej,'wt') as rej:

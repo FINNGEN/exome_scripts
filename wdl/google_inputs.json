@@ -3,4 +3,9 @@
         "project":"finngen3",
         "product":"exome"
     }
+    ,
+    "default_runtime_attributes": {
+	"docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
+    	"zones": "europe-west1-b europe-west1-c europe-west1-d"
+    }
 }
