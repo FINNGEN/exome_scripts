@@ -5,7 +5,7 @@
     }
     ,
     "default_runtime_attributes": {
-	"docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
+	"docker": "eu.gcr.io/finngen-refinery-dev/exome_bioinf:v2",
     	"zones": "europe-west1-b europe-west1-c europe-west1-d"
     }
 }

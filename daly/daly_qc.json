@@ -1,0 +1,5 @@
+{
+  "daly_qc.test_mode": false,
+  "daly_qc.vcf_list": "gs://fg-3/exome_v2/inputs/daly_qc_files_test.txt"
+}
+
