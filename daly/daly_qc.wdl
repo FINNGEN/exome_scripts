@@ -3,7 +3,6 @@ version 1.0
 workflow daly_qc {
   input {
     File vcf_list
-    Boolean test_mode
     String filter_expression = 'FILTER~"NO_HQ_GENOTYPES"'
     Int cpu_count = 8
   }
@@ -12,7 +11,7 @@ workflow daly_qc {
     call AnnotateHeaders {
       input:
         input_vcf = vcf,
-        test_mode = test_mode
+        cpu_count = cpu_count
     }
     
     call ParallelFilter {
@@ -28,7 +27,8 @@ workflow daly_qc {
     input:
       vcf_files = ParallelFilter.filtered_vcf,
       vcf_tbi_files = ParallelFilter.filtered_vcf_tbi,
-      variant_counts = ParallelFilter.variant_count
+      variant_counts = ParallelFilter.variant_count,
+      cpu_count = cpu_count
   }
 
   output {
@@ -43,11 +43,12 @@ workflow daly_qc {
 task AnnotateHeaders {
   input {
     File input_vcf
-    Boolean test_mode
+    Int cpu_count = 4
   }
 
   Int disk_size = ceil(size(input_vcf,'GB')*2) + 20
   command <<<
+  
   basename=$(basename "~{input_vcf}")
   output_vcf="annotated.${basename}"
 
@@ -63,19 +64,9 @@ task AnnotateHeaders {
 
   missing_header="missing_filters.txt"
   > "$missing_header"
-  
-  # Select (possibly temporary) VCF to operate on
-  vcf_for_annotation="~{input_vcf}"
-  if [[ "~{test_mode}" == "true" ]]; then
-      # Use only first 10k variants
-      tmp_test_file=$(mktemp --suffix=.vcf.gz)
-      (bcftools view -h "~{input_vcf}"; bcftools view -H "~{input_vcf}" | head -n 10000) | bgzip > "$tmp_test_file"
-      tabix -p vcf "$tmp_test_file"
-      vcf_for_annotation="$tmp_test_file"
-  fi
 
   # Extract FILTER IDs in header (populate array)
-  mapfile -t header_filters < <(bcftools view -h "$vcf_for_annotation" | awk -F'[=,]' '/^##FILTER=/{print $3}')
+  mapfile -t header_filters < <(bcftools view -h "~{input_vcf}" | awk -F'[=,]' '/^##FILTER=/{print $3}')
   
   # For each FILTER_DESC key, write a header if missing in VCF
   for filter in "${!FILTER_DESC[@]}"; do
@@ -93,15 +84,71 @@ task AnnotateHeaders {
 
   # Annotate header if missing filters present
   if [[ -s "$missing_header" ]]; then
-      # Fast header-only injection (no need to parse variants)
-      (bcftools view -h "$vcf_for_annotation" | head -n -1;
+      echo "Annotating with missing FILTER headers..."
+      # Step 1: Create new header with bcftools (fast, only reads header)
+      (bcftools view -h "~{input_vcf}" | head -n -1;
        cat "$missing_header";
-       bcftools view -h "$vcf_for_annotation" | tail -n 1;
-       bcftools view -H "$vcf_for_annotation") | bgzip > "$output_vcf"
+       bcftools view -h "~{input_vcf}" | tail -n 1) > new_header.txt
+      
+      echo "Appending body with parallel compression..."
+      
+      # Get input file size for progress monitoring
+      input_size=$(stat -c%s "~{input_vcf}" 2>/dev/null || stat -f%z "~{input_vcf}" 2>/dev/null)
+      echo "Input file size: $(numfmt --to=iec-i --suffix=B $input_size 2>/dev/null || echo $input_size bytes)"
+      
+      # Start file size monitor in background
+      (
+          sleep 3
+          start_monitor=$(date +%s)
+          while kill -0 $$ 2>/dev/null; do
+              if [ -f "$output_vcf" ]; then
+                  current_size=$(stat -c%s "$output_vcf" 2>/dev/null || stat -f%z "$output_vcf" 2>/dev/null || echo 0)
+                  if [ "$current_size" -gt 0 ] && [ "$input_size" -gt 0 ]; then
+                      pct=$((current_size * 100 / input_size))
+                      elapsed=$(($(date +%s) - start_monitor))
+                      if [ "$pct" -gt 0 ] && [ "$elapsed" -gt 0 ]; then
+                          eta=$((elapsed * (100 - pct) / pct))
+                          rate=$((current_size / elapsed))
+                          printf "\r[Progress] %3d%% | %s / %s | Rate: %s/s | ETA: %dm%ds     " \
+                              "$pct" \
+                              "$(numfmt --to=iec-i --suffix=B $current_size 2>/dev/null || echo ${current_size}B)" \
+                              "$(numfmt --to=iec-i --suffix=B $input_size 2>/dev/null || echo ${input_size}B)" \
+                              "$(numfmt --to=iec-i --suffix=B $rate 2>/dev/null || echo ${rate}B)" \
+                              "$((eta / 60))" "$((eta % 60))"
+                      fi
+                  fi
+              fi
+              sleep 30
+          done
+          echo ""
+      ) &
+      monitor_pid=$!
+      
+      # Step 2: Append body with zcat (fast, no VCF parsing)
+      if command -v pigz &> /dev/null; then
+          echo "Using pigz for parallel decompression"
+          (cat new_header.txt;
+           pigz -dc -p~{cpu_count} "~{input_vcf}" | grep -v "^#") | bgzip -@~{cpu_count} -c > "$output_vcf"
+      else
+          (cat new_header.txt;
+           zcat "~{input_vcf}" | grep -v "^#") | bgzip -@~{cpu_count} -c > "$output_vcf"
+      fi
+      
+      # Stop monitor
+      kill "$monitor_pid" 2>/dev/null || true
+      wait "$monitor_pid" 2>/dev/null || true
+      
+      rm -f new_header.txt
+      
+      # Index the modified VCF
+      echo "Indexing modified VCF..."
+      tabix -p vcf "$output_vcf"
   else
-      cp "$vcf_for_annotation"  "$output_vcf"
+      echo "No missing headers - copying VCF and index..."
+      cp "~{input_vcf}" "$output_vcf"
+      # Copy the index instead of recalculating (header-only changes don't affect index)
+      cp "~{input_vcf}.tbi" "${output_vcf}.tbi"
   fi
-  tabix -p vcf "$output_vcf"
   
   >>>
 
@@ -113,7 +160,7 @@ task AnnotateHeaders {
   runtime {
     memory: "4G"
     disks: "local-disk ~{disk_size} HDD"
-    cpu: 1
+    cpu: cpu_count
     preemptible: 1
   }
 }
@@ -209,12 +256,13 @@ task SortAndMerge {
     Array[File] vcf_files
     Array[File] vcf_tbi_files
     Array[Int] variant_counts
+    Int cpu_count = 8
   }
 
   Int disk_size = ceil(size(vcf_files,'GB')*2) + 50
   
   command <<<
-  set -euo
+  
   
   # Create file list
   cat ~{write_lines(vcf_files)} > unsorted_vcf_list.txt
@@ -262,7 +310,7 @@ task SortAndMerge {
   runtime {
     memory: "8G"
     disks: "local-disk ~{disk_size} HDD"
-    cpu: 2
+    cpu: cpu_count
     preemptible: 1
   }
 }
