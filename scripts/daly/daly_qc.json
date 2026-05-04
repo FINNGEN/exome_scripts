@@ -1,0 +1,6 @@
+{
+  "daly_qc.vcf_list": "gs://fg-3/exome_v2/inputs/daly_qc_files.txt",
+  "daly_qc.filter_expression": "FILTER~\"NO_HQ_GENOTYPES\"",
+  "daly_qc.cpu_count": 8
+}
+
