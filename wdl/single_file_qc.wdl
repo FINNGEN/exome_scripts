@@ -45,75 +45,76 @@ task FilterByChromosome {
   Int disk_size = ceil(size(input_vcf, 'GB') * 3) + 20
 
   command <<<
-    set -euo
-
-    input_file="~{input_vcf}"
-    touch $input_vcf_index
-    CHUNKS=~{cpu_count}
-    
-    # Create output filename with QC_ANNOTATED suffix
-    basename=$(basename "$input_file" .vcf.gz)
-    basename=$(basename "$basename" .vcf.bgz)
-    basename=$(basename "$basename" .bcf)
-    output_file="${basename}.QC_ANNOTATED.vcf.gz"
-    
-    echo "=== ADPKD Parallel Filter by Chromosome ==="
-    echo "Input: $input_file"
-    echo "Output: $output_file"
-    echo "Genotype filter: ~{genotype_filter}"
-    echo "Variant filter: ~{variant_filter}"
-    echo "CPU cores: $CHUNKS"
-    echo ""
-
-    # Get list of chromosomes from the VCF index
-    echo "Extracting chromosome list..."
-    mapfile -t chromosomes < <(bcftools index -s "$input_file" | awk '{print $1}')
-    num_chroms=${#chromosomes[@]}
-
-    echo "Found $num_chroms chromosomes: ${chromosomes[*]}"
-
-    if [[ $num_chroms -eq 0 ]]; then
+  set -euo
+  
+  input_file="~{input_vcf}"
+  touch ~{input_vcf_index}
+  CHUNKS=~{cpu_count}
+  
+  # Create output filename with QC_ANNOTATED suffix
+  basename=$(basename "$input_file" .vcf.gz)
+  basename=$(basename "$basename" .vcf.bgz)
+  basename=$(basename "$basename" .bcf)
+  output_file="${basename}.QC_ANNOTATED.vcf.gz"
+  
+  echo "=== ADPKD Parallel Filter by Chromosome ==="
+  echo "Input: $input_file"
+  echo "Output: $output_file"
+  echo "Genotype filter: ~{genotype_filter}"
+  echo "Variant filter: ~{variant_filter}"
+  echo "CPU cores: $CHUNKS"
+  echo ""
+  
+  # Get list of chromosomes from the VCF index
+  echo "Extracting chromosome list..."
+  mapfile -t chromosomes < <(bcftools index -s "$input_file" | awk '{print $1}')
+  num_chroms=${#chromosomes[@]}
+  
+  echo "Found $num_chroms chromosomes: ${chromosomes[*]}"
+  
+  if [[ $num_chroms -eq 0 ]]; then
       echo "Error: No chromosomes found in VCF"
       exit 1
-    fi
+  fi
 
-    # Create chromosome list file for parallel processing
-    rm -f chrom_list.txt
-    for chrom in "${chromosomes[@]}"; do
+  # Create chromosome list file for parallel processing
+  rm -f chrom_list.txt
+  for chrom in "${chromosomes[@]}"; do
       echo "$chrom" >> chrom_list.txt
-    done
+  done
+  
+  echo "Processing $num_chroms chromosomes in parallel (max $CHUNKS jobs)..."
+  
+  # Create processing script to avoid quoting issues
+  cat > process_chunk.sh << 'SCRIPT_EOF'
+  #!/bin/bash
+  input_file="$1"
+  chrom="$2"
+  output_file="chunk_${chrom}.vcf.gz"
 
-    echo "Processing $num_chroms chromosomes in parallel (max $CHUNKS jobs)..."
+  echo "Processing chromosome: $chrom"
+  bcftools view -r "$chrom" "$input_file" -Ou | \
+  bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | \
+  bcftools +fill-tags -Ou -- -t AC | \
+  bcftools view -i '~{variant_filter}' -Ou | \
+  bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "$output_file"
+  echo "Completed chromosome: $chrom"
+  SCRIPT_EOF
+  chmod +x process_chunk.sh
 
-    # Create processing script to avoid quoting issues
-    cat > process_chunk.sh << 'SCRIPT_EOF'
-    #!/bin/bash
-    input_file="$1"
-    chrom="$2"
-    genotype_filter="$3"
-    variant_filter="$4"
-    output_file="chunk_${chrom}.vcf.gz"
+  # Process each chromosome in parallel
+  cat chrom_list.txt | parallel -j "$CHUNKS" './process_chunk.sh "'"$input_file"'" {}'
+  
+  echo "Concatenating chromosomes..."
+  bcftools concat -n -Oz -o filtered.vcf.gz chunk_*.vcf.gz
+  
+  echo "Indexing final output..."
+  tabix -p vcf filtered.vcf.gz
 
-    echo "Processing chromosome: $chrom"
-    bcftools view -r "$chrom" "$input_file" -Ou |  bcftools +setGT -Ou -- -t q -n . -i "$genotype_filter" |  bcftools +fill-tags -Ou -- -t AC |  bcftools view -i "$variant_filter" -Ou |  bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "$output_file"
-    echo "Completed chromosome: $chrom"
-    SCRIPT_EOF
-    chmod +x process_chunk.sh
-
-    # Process each chromosome in parallel
-    cat chrom_list.txt | parallel -j "$CHUNKS" './process_chunk.sh "'"$input_file"'" {} "~{genotype_filter}" "~{variant_filter}"'
-
-    echo "Concatenating chromosomes..."
-    bcftools concat -n -Oz -o filtered.vcf.gz chunk_*.vcf.gz
-
-    echo "Indexing final output..."
-    tabix -p vcf filtered.vcf.gz
-
-    # Cleanup
-    echo "Cleaning up temporary files..."
-    rm -f chunk_*.vcf.gz chrom_list.txt process_chunk.sh
-
-    echo "=== Complete! ==="
+  # Cleanup
+  echo "Cleaning up temporary files..."
+  rm -f chunk_*.vcf.gz chrom_list.txt process_chunk.sh
+  echo "=== Complete! ==="
   >>>
 
   output {
@@ -122,7 +123,6 @@ task FilterByChromosome {
   }
 
   runtime {
-    memory: "16G"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu_count
     preemptible: 1
