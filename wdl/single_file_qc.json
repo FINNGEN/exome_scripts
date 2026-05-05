@@ -1,7 +1,7 @@
 {
   "single_file_qc.vcf_files": [
       "gs://fg-3/exome/data/THLBB2023_14_FinnGen_WES_Botnia_QCd/THLBB2023_14_WES_Botnia.vcf.gz",
-      "gs://fg-3/exome/data/ADPKD_WES_release_v1_18.03.2026/annotated_data/likely_pathogenic_annot_annotated_full.vcf.bgz"
+      "gs://fg-3/exome/data/pietro_edits/likely_pathogenic_annot_annotated_full_header_fix.vcf.bgz"
   ],
     "single_file_qc.genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
     "single_file_qc.variant_filter": "AC>0 & ALT!=\"*\"",

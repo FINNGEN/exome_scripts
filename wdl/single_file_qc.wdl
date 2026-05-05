@@ -52,7 +52,9 @@ task FilterByChromosome {
   
   input_file="~{input_vcf}"
   touch ~{input_vcf_index}
-  CHUNKS=~{cpu_count}
+  # Use nproc-1 to leave buffer for system overhead
+  CHUNKS=$(( $(nproc) - 1 ))
+  if [ $CHUNKS -lt 1 ]; then CHUNKS=1; fi
   
   echo "=== Parallel Filter by Chromosome ==="
   echo "Input: $input_file"
@@ -75,42 +77,51 @@ task FilterByChromosome {
   fi
 
   # Create chromosome list file for parallel processing
-  rm -f chrom_list.txt
+  echo "Processing $num_chroms chromosomes in parallel (max $CHUNKS jobs)..."
+  echo ""
+  
+  # Create a file with complete bcftools commands for each chromosome
+  rm -f commands.txt
   for chrom in "${chromosomes[@]}"; do
-      echo "$chrom" >> chrom_list.txt
+    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
+    # Escape curly braces for eval
+    cat >> commands.txt << EOF
+echo "Processing: $chrom" && bcftools view -r "\\{$chrom\\}" "$input_file" -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${safe_chrom}.vcf.gz" && echo "  ✓ Done: $chrom"
+EOF
   done
   
-  echo "Processing $num_chroms chromosomes in parallel (max $CHUNKS jobs)..."
+  echo "Sample commands (first 5):"
+  head -5 commands.txt
+  echo ""
+  echo "Sample HLA commands:"
+  grep "HLA" commands.txt | head -3 || echo "No HLA chromosomes found"
+  echo ""
   
-  # Create processing script to avoid quoting issues
-  cat > process_chunk.sh << 'SCRIPT_EOF'
-  #!/bin/bash
-  input_file="$1"
-  chrom="$2"
-  output_file="chunk_${chrom}.vcf.gz"
-
-  echo "Processing chromosome: $chrom"
-  bcftools view -r "$chrom" "$input_file" -Ou | \
-  bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | \
-  bcftools +fill-tags -Ou -- -t AC | \
-  bcftools view -i '~{variant_filter}' -Ou | \
-  bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "$output_file"
-  echo "Completed chromosome: $chrom"
-  SCRIPT_EOF
-  chmod +x process_chunk.sh
-
-  # Process each chromosome in parallel
-  cat chrom_list.txt | parallel -j "$CHUNKS" './process_chunk.sh "'"$input_file"'" {}'
+  # Execute all commands in parallel using bash background jobs
+  while read -r cmd; do
+    while [ $(jobs -r | wc -l) -ge $CHUNKS ]; do sleep 0.1; done
+    eval "$cmd" &
+  done < commands.txt
+  wait
   
-  echo "Concatenating chromosomes..."
-  bcftools concat -n -Oz -o ~{output_vcf} chunk_*.vcf.gz
+  echo ""
+  echo "Concatenating chromosomes in original order..."
+  # Build ordered list of chunk files based on chromosome order
+  rm -f chunk_list.txt
+  for chrom in "${chromosomes[@]}"; do
+    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
+    echo "chunk_${safe_chrom}.vcf.gz" >> chunk_list.txt
+  done
+  
+  # Concatenate in chromosome order
+  bcftools concat -n -Oz -o ~{output_vcf} -f chunk_list.txt
   
   echo "Indexing final output..."
   tabix -p vcf ~{output_vcf}
 
   # Cleanup
   echo "Cleaning up temporary files..."
-  rm -f chunk_*.vcf.gz chrom_list.txt process_chunk.sh
+  rm -f chunk_*.vcf.gz commands.txt chunk_list.txt
   echo "=== Complete! ==="
   >>>
 
@@ -206,6 +217,55 @@ task ValidateFiltering {
     else
       echo "✗ FAIL: ID not in expected format (got: $sample_id)" >> report.txt
     fi
+
+    echo "" >> report.txt
+
+    # Test 4: Check chromosome order preservation and filtering statistics
+    echo "Test 4: Chromosome order and filtering statistics" >> report.txt
+    echo "---------------------------------------------------" >> report.txt
+    
+    # Extract unique chromosomes from both files with counts
+    bcftools query -f '%CHROM\n' "~{original_vcf}" | sort | uniq -c | awk '{print $2"\t"$1}' > original_chrom_counts.txt
+    bcftools query -f '%CHROM\n' "~{filtered_vcf}" | sort | uniq -c | awk '{print $2"\t"$1}' > filtered_chrom_counts.txt
+    
+    # Get ordered chromosome list
+    bcftools query -f '%CHROM\n' "~{original_vcf}" | uniq > original_chroms.txt
+    bcftools query -f '%CHROM\n' "~{filtered_vcf}" | uniq > filtered_chroms.txt
+    
+    echo "Original chromosomes: $(wc -l < original_chroms.txt)" >> report.txt
+    echo "Filtered chromosomes: $(wc -l < filtered_chroms.txt)" >> report.txt
+    echo "" >> report.txt
+    
+    # Per-chromosome filtering statistics
+    echo "Per-chromosome variant counts and filtering:" >> report.txt
+    printf "%-30s %10s %10s %10s\n" "CHROMOSOME" "ORIGINAL" "FILTERED" "%_DROPPED" >> report.txt
+    printf "%-30s %10s %10s %10s\n" "----------" "--------" "--------" "---------" >> report.txt
+    
+    while read chrom; do
+      orig_count=$(grep -w "^$chrom" original_chrom_counts.txt | awk '{print $2}' || echo "0")
+      filt_count=$(grep -w "^$chrom" filtered_chrom_counts.txt | awk '{print $2}' || echo "0")
+      
+      if [[ "$orig_count" -gt 0 ]]; then
+        pct_dropped=$(awk "BEGIN {printf \"%.1f\", (($orig_count - $filt_count) / $orig_count) * 100}")
+      else
+        pct_dropped="0.0"
+      fi
+      
+      printf "%-30s %10s %10s %9s%%\n" "$chrom" "$orig_count" "$filt_count" "$pct_dropped" >> report.txt
+    done < original_chroms.txt
+    
+    echo "" >> report.txt
+    
+    # Check if filtered chromosomes are in same order
+    if diff original_chroms.txt filtered_chroms.txt > /dev/null 2>&1; then
+      echo "✓ PASS: All chromosomes preserved in original order" >> report.txt
+    elif comm -12 original_chroms.txt filtered_chroms.txt | diff - filtered_chroms.txt > /dev/null 2>&1; then
+      echo "✓ PASS: Chromosome order preserved (some chromosomes filtered out)" >> report.txt
+    else
+      echo "✗ FAIL: Chromosome order differs from input!" >> report.txt
+    fi
+    
+    rm -f original_chroms.txt filtered_chroms.txt original_chrom_counts.txt filtered_chrom_counts.txt
 
     echo "" >> report.txt
     echo "=== Validation Complete ===" >> report.txt
