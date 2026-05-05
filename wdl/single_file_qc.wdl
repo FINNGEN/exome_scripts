@@ -42,6 +42,9 @@ task FilterByChromosome {
   }
 
   File input_vcf_index = input_vcf + ".tbi"
+  String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
+  String output_vcf = base_name + ".QC_ANNOTATED.vcf.gz"
+  String output_tbi = base_name + ".QC_ANNOTATED.vcf.gz.tbi"
   Int disk_size = ceil(size(input_vcf, 'GB') * 3) + 20
 
   command <<<
@@ -51,15 +54,9 @@ task FilterByChromosome {
   touch ~{input_vcf_index}
   CHUNKS=~{cpu_count}
   
-  # Create output filename with QC_ANNOTATED suffix
-  basename=$(basename "$input_file" .vcf.gz)
-  basename=$(basename "$basename" .vcf.bgz)
-  basename=$(basename "$basename" .bcf)
-  output_file="${basename}.QC_ANNOTATED.vcf.gz"
-  
-  echo "=== ADPKD Parallel Filter by Chromosome ==="
+  echo "=== Parallel Filter by Chromosome ==="
   echo "Input: $input_file"
-  echo "Output: $output_file"
+  echo "Output: ~{output_vcf}"
   echo "Genotype filter: ~{genotype_filter}"
   echo "Variant filter: ~{variant_filter}"
   echo "CPU cores: $CHUNKS"
@@ -106,10 +103,10 @@ task FilterByChromosome {
   cat chrom_list.txt | parallel -j "$CHUNKS" './process_chunk.sh "'"$input_file"'" {}'
   
   echo "Concatenating chromosomes..."
-  bcftools concat -n -Oz -o filtered.vcf.gz chunk_*.vcf.gz
+  bcftools concat -n -Oz -o ~{output_vcf} chunk_*.vcf.gz
   
   echo "Indexing final output..."
-  tabix -p vcf filtered.vcf.gz
+  tabix -p vcf ~{output_vcf}
 
   # Cleanup
   echo "Cleaning up temporary files..."
@@ -118,8 +115,8 @@ task FilterByChromosome {
   >>>
 
   output {
-    File filtered_vcf = "filtered.vcf.gz"
-    File filtered_vcf_tbi = "filtered.vcf.gz.tbi"
+    File filtered_vcf = output_vcf
+    File filtered_vcf_tbi = output_tbi
   }
 
   runtime {

@@ -27,7 +27,6 @@ workflow daly_qc {
     input:
       vcf_files = ParallelFilter.filtered_vcf,
       vcf_tbi_files = ParallelFilter.filtered_vcf_tbi,
-      variant_counts = ParallelFilter.variant_count,
       cpu_count = cpu_count
   }
 
@@ -255,14 +254,17 @@ task SortAndMerge {
   input {
     Array[File] vcf_files
     Array[File] vcf_tbi_files
-    Array[Int] variant_counts
     Int cpu_count = 8
   }
 
+  String first_file = basename(vcf_files[0])
+  String base_name = sub(sub(first_file, "\\.vcf\\.(gz|bgz)$", ""), "_chr[0-9XY]+$", "")
+  String output_vcf = base_name + ".vcf.gz"
+  String output_tbi = base_name + ".vcf.gz.tbi"
+  
   Int disk_size = ceil(size(vcf_files,'GB')*2) + 50
   
   command <<<
-  
   
   # Create file list
   cat ~{write_lines(vcf_files)} > unsorted_vcf_list.txt
@@ -272,39 +274,20 @@ task SortAndMerge {
   
   echo "Sorted VCF files:"
   cat sorted_vcf_list.txt
-  
-  # Sum individual chromosome variant counts
-  expected_total=0
-  for count in ~{sep=" " variant_counts}; do
-    expected_total=$((expected_total + count))
-  done
-  echo "Expected total variants (sum of individual chromosomes): $expected_total"
+  echo "Output filename: ~{output_vcf}"
   
   echo "Concatenating sorted chromosomes..."
-  bcftools concat -f sorted_vcf_list.txt -Oz -o merged.vcf.gz
+  bcftools concat -f sorted_vcf_list.txt -Oz -o ~{output_vcf}
   
   echo "Indexing merged VCF..."
-  tabix -p vcf merged.vcf.gz
+  tabix -p vcf ~{output_vcf}
   
-  # Count total variants in merged file
-  total_variants=$(bcftools view -H merged.vcf.gz | wc -l)
-  echo "Actual total variants in merged file: $total_variants"
-  echo "$total_variants" > total_variant_count.txt
-  
-  # Verify counts match
-  if [ "$total_variants" -eq "$expected_total" ]; then
-    echo "✓ Variant counts match! ($total_variants variants)"
-  else
-    echo "⚠ WARNING: Variant count mismatch! Expected $expected_total but got $total_variants"
-  fi
-  
-  echo "Done! Output file: merged.vcf.gz"
+  echo "Done! Output file: ~{output_vcf}"
   >>>
 
   output {
-    File merged_vcf = "merged.vcf.gz"
-    File merged_vcf_tbi = "merged.vcf.gz.tbi"
-    Int total_variant_count = read_int("total_variant_count.txt")
+    File merged_vcf = output_vcf
+    File merged_vcf_tbi = output_tbi
   }
 
   runtime {
