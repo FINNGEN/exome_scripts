@@ -84,9 +84,8 @@ task FilterByChromosome {
   rm -f commands.txt
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
-    # Escape curly braces for eval
     cat >> commands.txt << EOF
-echo "Processing: $chrom" && bcftools view -r "\\{$chrom\\}" "$input_file" -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${safe_chrom}.vcf.gz" && echo "  ✓ Done: $chrom"
+echo "Processing: $chrom" && bcftools view -r "{$chrom}" "$input_file" -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${safe_chrom}.vcf.gz" && echo "  ✓ Done: $chrom"
 EOF
   done
   
@@ -97,12 +96,8 @@ EOF
   grep "HLA" commands.txt | head -3 || echo "No HLA chromosomes found"
   echo ""
   
-  # Execute all commands in parallel using bash background jobs
-  while read -r cmd; do
-    while [ $(jobs -r | wc -l) -ge $CHUNKS ]; do sleep 0.1; done
-    eval "$cmd" &
-  done < commands.txt
-  wait
+  # Execute all commands in parallel
+  parallel -j "$CHUNKS" < commands.txt
   
   echo ""
   echo "Concatenating chromosomes in original order..."
