@@ -225,9 +225,9 @@ task ValidateFiltering {
         after_gt=$(bcftools query -s "$sample" -r "$chrom:$pos" -f '[\t%GT]\n' "~{filtered_vcf}" 2>/dev/null | tr -d '\t' | tr -d ' ')
         
         if [[ "$after_gt" == "./." ]] || [[ "$after_gt" == "." ]]; then
-          echo "✓ PASS: $chrom:$pos sample=$sample GT: $gt → $after_gt" >> report.txt
+          echo "✓ PASS: $chrom:$pos GT: $gt → $after_gt" >> report.txt
         else
-          echo "✗ FAIL: $chrom:$pos sample=$sample GT: $gt → $after_gt (not missing)" >> report.txt
+          echo "✗ FAIL: $chrom:$pos GT: $gt → $after_gt (not missing)" >> report.txt
         fi
         found=1
         break

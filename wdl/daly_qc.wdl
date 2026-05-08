@@ -8,6 +8,11 @@ workflow daly_qc {
   }
   Array[File] vcf_files = read_lines(vcf_list)
   scatter (vcf in vcf_files) {
+    call ComputeStats as OriginalStats {
+      input:
+        input_vcf = vcf
+    }
+    
     call AnnotateHeaders {
       input:
         input_vcf = vcf,
@@ -21,6 +26,22 @@ workflow daly_qc {
         filter_expression = filter_expression,
         cpu_count = cpu_count
     }
+    
+    call ComputeStats as FilteredStats {
+      input:
+        input_vcf = ParallelFilter.filtered_vcf
+    }
+    
+    call ValidateFiltering {
+      input:
+        original_sample_vcf = OriginalStats.sample_vcf,
+        original_sample_vcf_tbi = OriginalStats.sample_vcf_tbi,
+        original_stats = OriginalStats.stats,
+        filtered_sample_vcf = FilteredStats.sample_vcf,
+        filtered_sample_vcf_tbi = FilteredStats.sample_vcf_tbi,
+        filtered_stats = FilteredStats.stats,
+        filter_expression = filter_expression
+    }
   }
 
   call SortAndMerge {
@@ -30,12 +51,22 @@ workflow daly_qc {
       cpu_count = cpu_count
   }
 
+  call SummaryStats {
+    input:
+      vcf_file_names = vcf_files,
+      original_stats = OriginalStats.stats,
+      filtered_stats = FilteredStats.stats
+  }
+
   output {
     Array[File] filtered_vcfs = ParallelFilter.filtered_vcf
     Array[File] filtered_vcf_tbis = ParallelFilter.filtered_vcf_tbi
+    Array[File] original_stats = OriginalStats.stats
+    Array[File] filtered_stats = FilteredStats.stats
+    Array[File] validation_reports = ValidateFiltering.report
     File merged_vcf = SortAndMerge.merged_vcf
     File merged_vcf_tbi = SortAndMerge.merged_vcf_tbi
-    Int total_variant_count = SortAndMerge.total_variant_count
+    File summary_table = SummaryStats.summary
   }
 }
 
@@ -294,6 +325,229 @@ task SortAndMerge {
     memory: "8G"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu_count
+    preemptible: 1
+  }
+}
+
+task ComputeStats {
+  input {
+    File input_vcf
+  }
+
+  File input_vcf_tbi = input_vcf + ".tbi"
+  Int disk_size = ceil(size(input_vcf, 'GB')) + 10
+
+  command <<<
+  set -euo
+
+  echo "=== Computing variant count ==="
+  
+  # Touch index to ensure it's localized
+  touch ~{input_vcf_tbi}
+  
+  # Get chromosome from first variant
+  chrom=$(bcftools query -f '%CHROM\n' "~{input_vcf}" | head -n 1)
+  echo "Chromosome: $chrom"
+
+  # Count total variants
+  variant_count=$(bcftools view -H "~{input_vcf}" | wc -l)
+  echo "Total variants: $variant_count"
+  
+  # Create a small sample VCF (100 variants) for chromosome validation
+  echo "Creating sample VCF for validation (100 variants)..."
+  bcftools view -h "~{input_vcf}" | bgzip -c > sample.vcf.gz
+  bcftools view -H "~{input_vcf}" | head -n 100 | bgzip -c >> sample.vcf.gz
+  tabix -p vcf sample.vcf.gz
+  echo "Sample VCF created: $(bcftools view -H sample.vcf.gz | wc -l) variants"
+  
+  # Create stats file
+  echo -e "variant_count\t$variant_count" > stats.txt
+  
+  echo "=== Complete ==="
+  >>>
+
+  output {
+    File stats = "stats.txt"
+    File sample_vcf = "sample.vcf.gz"
+    File sample_vcf_tbi = "sample.vcf.gz.tbi"
+  }
+
+  runtime {
+    memory: "2G"
+    disks: "local-disk ~{disk_size} HDD"
+    cpu: 1
+    preemptible: 1
+  }
+}
+
+task SummaryStats {
+  input {
+    Array[String] vcf_file_names
+    Array[File] original_stats
+    Array[File] filtered_stats
+  }
+
+  Int disk_size = 10
+
+  command <<<
+  set -euo
+
+  echo "=== Creating Summary Statistics ==="
+  
+  # Create header
+  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.tsv
+  
+  # Process each VCF file
+  idx=0
+  while IFS= read -r vcf_file; do
+    # Extract chromosome from filename (e.g., chr1.vcf.gz -> chr1)
+    filename=$(basename "$vcf_file")
+    chrom=$(echo "$filename" | sed -E 's/.*_(chr[0-9XY]+).*\.vcf\.(gz|bgz)$/\1/' | sed -E 's/^.*chr([0-9XY]+).*$/chr\1/' | sed -E 's/.*[^a-zA-Z](chr[0-9XY]+)[^a-zA-Z].*$/\1/' | head -1)
+    
+    # Fallback: try to extract just the chromosome number/letter
+    if [[ -z "$chrom" ]] || [[ "$chrom" == "$filename" ]]; then
+      chrom=$(echo "$filename" | grep -oE '(chr)?[0-9XY]+' | head -1)
+    fi
+    
+    # If still empty, use filename
+    if [[ -z "$chrom" ]]; then
+      chrom=$(echo "$filename" | sed 's/\..*//')
+    fi
+    
+    # Read original and filtered counts from stats files (not VCFs)
+    orig_stats_file=$(echo "~{sep=' ' original_stats}" | cut -d' ' -f$((idx+1)))
+    filt_stats_file=$(echo "~{sep=' ' filtered_stats}" | cut -d' ' -f$((idx+1)))
+    
+    orig_count=$(grep "variant_count" "$orig_stats_file" | cut -f2)
+    filt_count=$(grep "variant_count" "$filt_stats_file" | cut -f2)
+    
+    # Calculate percent dropped
+    if [[ "$orig_count" -gt 0 ]]; then
+      pct_dropped=$(awk "BEGIN {printf \"%.2f\", (($orig_count - $filt_count) / $orig_count) * 100}")
+    else
+      pct_dropped="0.00"
+    fi
+    
+    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.tsv
+    idx=$((idx + 1))
+  done < <(cat << 'EOF'
+~{sep='\n' vcf_file_names}
+EOF
+)
+  
+  # Add totals row
+  echo "" >> summary.tsv
+  total_orig=$(grep "variant_count" ~{sep=' ' original_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
+  total_filt=$(grep "variant_count" ~{sep=' ' filtered_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
+  total_pct=$(awk "BEGIN {printf \"%.2f\", (($total_orig - $total_filt) / $total_orig) * 100}")
+  
+  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.tsv
+  
+  echo ""
+  echo "Summary Table:"
+  column -t summary.tsv
+  
+  echo "=== Complete ==="
+  >>>
+
+  output {
+    File summary = "summary.tsv"
+  }
+
+  runtime {
+    memory: "2G"
+    disks: "local-disk ~{disk_size} HDD"
+    cpu: 1
+    preemptible: 1
+  }
+}
+
+
+task ValidateFiltering {
+  input {
+    File original_sample_vcf
+    File original_sample_vcf_tbi
+    File original_stats
+    File filtered_sample_vcf
+    File filtered_sample_vcf_tbi
+    File filtered_stats
+    String filter_expression
+  }
+
+  Int disk_size = 10
+
+  command <<<
+  set -euo
+
+  echo "=== Validating VCF Filtering ===" > report.txt
+  echo "Sample-based validation (using up to 100 variants)" >> report.txt
+  echo "" >> report.txt
+
+  # Touch indices
+  touch ~{original_sample_vcf_tbi}
+  touch ~{filtered_sample_vcf_tbi}
+
+  # Read variant counts
+  orig_count=$(grep "variant_count" ~{original_stats} | cut -f2)
+  filt_count=$(grep "variant_count" ~{filtered_stats} | cut -f2)
+  
+  echo "Original variant count: $orig_count" >> report.txt
+  echo "Filtered variant count: $filt_count" >> report.txt
+  
+  if [[ "$orig_count" -gt 0 ]]; then
+    pct_kept=$(awk "BEGIN {printf \"%.1f\", ($filt_count / $orig_count) * 100}")
+    pct_dropped=$(awk "BEGIN {printf \"%.1f\", (($orig_count - $filt_count) / $orig_count) * 100}")
+  else
+    pct_kept="0.0"
+    pct_dropped="0.0"
+  fi
+  
+  echo "Kept: ${pct_kept}%" >> report.txt
+  echo "Dropped: ${pct_dropped}%" >> report.txt
+  echo "" >> report.txt
+
+  # Test 1: Check variants were filtered out based on FILTER expression
+  echo "Test 1: Checking variants matching filter expression were removed" >> report.txt
+  echo "Filter expression: ~{filter_expression}" >> report.txt
+  echo "-------------------------------------------------------------------" >> report.txt
+
+  # Check if any variants in filtered file match the filter expression
+  filtered_matching=$(bcftools view -H -e '~{filter_expression}' "~{filtered_sample_vcf}" 2>/dev/null | wc -l || echo "0")
+  filtered_total=$(bcftools view -H "~{filtered_sample_vcf}" 2>/dev/null | wc -l || echo "0")
+  
+  if [[ "$filtered_matching" -eq "$filtered_total" ]]; then
+    echo "✓ PASS: No variants matching filter expression found in filtered file" >> report.txt
+  elif [[ "$filtered_matching" -gt 0 ]]; then
+    echo "✗ FAIL: Found $filtered_matching variants matching filter expression (should be 0)" >> report.txt
+  else
+    echo "⚠ NOTE: Unable to check filter expression" >> report.txt
+  fi
+
+  echo "" >> report.txt
+
+  # Test 2: Check variant IDs
+  echo "Test 2: Checking variant IDs (CHROM_POS_REF_ALT format)" >> report.txt
+  echo "--------------------------------------------------------" >> report.txt
+
+  sample_id=$(bcftools view -H "~{filtered_sample_vcf}" 2>/dev/null | head -1 | awk '{print $3}')
+  if [[ "$sample_id" =~ ^[^_]+_[0-9]+_.+_.+$ ]]; then
+    echo "✓ PASS: IDs formatted as CHROM_POS_REF_ALT (example: $sample_id)" >> report.txt
+  else
+    echo "✗ FAIL: ID not in expected format (got: $sample_id)" >> report.txt
+  fi
+
+  echo "" >> report.txt
+  echo "=== Validation Complete ===" >> report.txt
+  >>>
+
+  output {
+    File report = "report.txt"
+  }
+
+  runtime {
+    memory: "2G"
+    disks: "local-disk ~{disk_size} HDD"
+    cpu: 1
     preemptible: 1
   }
 }
