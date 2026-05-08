@@ -338,7 +338,20 @@ task SubsetSamples {
   NCOLS=$((9 + ~{sample_count}))
     
   echo "=== Subsetting VCF to first ~{sample_count} samples (columns 1-$NCOLS) ==="
-  zcat "~{input_vcf}" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c > ~{output_vcf}
+  
+  # Extract metadata lines (##) - keep intact
+  echo "Processing metadata..."
+  bcftools view -h "~{input_vcf}" | grep "^##" | bgzip -@ $THREADS -c > ~{output_vcf}
+  
+  # Extract and cut column header line (#CHROM)
+  echo "Processing column header..."
+  bcftools view -h "~{input_vcf}" | grep "^#CHROM" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
+  
+  # Extract and cut body (skip all header lines starting with #)
+  echo "Processing body..."
+  zcat "~{input_vcf}" | grep -v "^#" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
+  
+  echo "Indexing..."
   tabix -p vcf ~{output_vcf}
   echo "=== Complete ==="
   >>>
