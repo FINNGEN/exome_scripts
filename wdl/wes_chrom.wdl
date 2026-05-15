@@ -289,7 +289,7 @@ EOF
   }
 
   runtime {
-    memory: "8G"
+    memory: "~{cpu_count} GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu_count
     preemptible: 1
