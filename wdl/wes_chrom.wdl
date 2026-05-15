@@ -201,6 +201,12 @@ task ParallelFilterByRegion {
   File input_vcf_tbi = input_vcf + ".tbi"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
   Int disk_size = ceil(size(input_vcf,'GB')*3) + 20
+  Int vcf_size_gb = ceil(size(input_vcf, 'GB'))
+  Int memory_gb = if vcf_size_gb <= 8 then 8
+                  else if vcf_size_gb <= 16 then 16
+                  else if vcf_size_gb <= 32 then 32
+                  else if vcf_size_gb <= 64 then 64
+                  else 128
   
   command <<<
   set -euo
@@ -289,7 +295,7 @@ EOF
   }
 
   runtime {
-    memory: "~{cpu_count} GB"
+    memory: "~{memory_gb} GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu_count
     preemptible: 1
