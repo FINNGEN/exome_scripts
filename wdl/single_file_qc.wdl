@@ -7,6 +7,7 @@ workflow single_file_qc {
     String variant_filter
     Int cpu_count
     Int? test_sample_count
+    File norm_fasta
   }
 
   scatter (vcf in vcf_files) {
@@ -30,7 +31,8 @@ workflow single_file_qc {
         input_vcf = vcf_to_filter,
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
-        cpu_count = cpu_count
+        cpu_count = cpu_count,
+        norm_fasta = norm_fasta
     }
 
     call ComputeStats as FilteredStats {
@@ -62,9 +64,11 @@ task FilterByChromosome {
     String genotype_filter
     String variant_filter
     Int cpu_count
+    File norm_fasta
   }
 
   File input_vcf_index = input_vcf + ".tbi"
+  File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
   String output_vcf = base_name + ".QC_ANNOTATED.vcf.gz"
   String output_tbi = base_name + ".QC_ANNOTATED.vcf.gz.tbi"
@@ -74,9 +78,10 @@ task FilterByChromosome {
 
   command <<<
   set -euo
-  
+
   input_file="~{input_vcf}"
   touch ~{input_vcf_index}
+  touch ~{norm_fasta_fai}
   # Use nproc-1 to leave buffer for system overhead
   CHUNKS=$(( $(nproc) - 1 ))
   if [ $CHUNKS -lt 1 ]; then CHUNKS=1; fi
@@ -110,7 +115,7 @@ task FilterByChromosome {
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
     cat >> commands.txt << EOF
-echo "Processing: $chrom" && bcftools view -r "{$chrom}" "$input_file" -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${safe_chrom}.vcf.gz" && echo "  ✓ Done: $chrom"
+echo "Processing: $chrom" && bcftools view -r "{$chrom}" "$input_file" -Ou | bcftools norm -f '~{norm_fasta}' -c x -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${safe_chrom}.vcf.gz" && echo "  ✓ Done: $chrom"
 EOF
   done
   

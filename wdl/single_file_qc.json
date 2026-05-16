@@ -1,5 +1,6 @@
 {
     "single_file_qc.vcf_files": ["gs://fg-3/exome/data/THLBB2023_14_FinnGen_WES_Botnia_QCd/THLBB2023_14_WES_Botnia.vcf.gz","gs://fg-3/exome/data/pietro_edits/likely_pathogenic_annot_annotated_full_header_fix_samples_renamed.vcf.bgz"],
+      "single_file_qc.norm_fasta": "gs://juham-fg/lift/broad/Homo_sapiens_assembly38.fasta",
     "single_file_qc.genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
     "single_file_qc.variant_filter": "AC>0 & ALT!=\"*\"",
     "single_file_qc.cpu_count": 16,

@@ -1,9 +1,11 @@
 {
-    "wes_chrom.cpu_count": 16,
+    "wes_chrom.cpu_count": 32,
     'wes_chrom.output_prefix':"finngen_wes_gnomad_v4",
     "wes_chrom.vcf_list":"gs://fg-3/exome_v2/inputs/wes_vcfs.txt",
     "wes_chrom.genotype_filter":  "FORMAT/DP<10 | FORMAT/GQ<20",
     "wes_chrom.variant_filter": "AC>0 & ALT!=\"*\"",
     #"wes_chrom.test_sample_count": 100
+    "wes_chrom.norm_fasta": "gs://juham-fg/lift/broad/Homo_sapiens_assembly38.fasta",
+
 }
 

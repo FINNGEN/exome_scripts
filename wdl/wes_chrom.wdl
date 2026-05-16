@@ -8,6 +8,7 @@ workflow wes_chrom {
     Int cpu_count
     Int? test_sample_count
     String output_prefix
+    File norm_fasta
    }
 
   Array[File] vcf_files = read_lines(vcf_list)
@@ -28,14 +29,21 @@ workflow wes_chrom {
         input_vcf = vcf_to_filter,
         cpu_count = cpu_count
     }
-    
-    call ParallelFilterByRegion {
+
+    call PreFilter {
       input:
         input_vcf = vcf_to_filter,
+        cpu_count = cpu_count
+    }
+
+    call ParallelFilterByRegion {
+      input:
+        input_vcf = PreFilter.prefiltered_vcf,
         positions = OriginalStats.positions,
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
-        cpu_count = cpu_count
+        cpu_count = cpu_count,
+        norm_fasta = norm_fasta
     }
     
     call ComputeStats as FilteredStats {
@@ -57,13 +65,6 @@ workflow wes_chrom {
     }
   }
 
-  call SortAndMerge {
-    input:
-    vcf_files = ParallelFilterByRegion.filtered_vcf,
-    vcf_tbi_files = ParallelFilterByRegion.filtered_vcf_tbi,
-    cpu_count = cpu_count,
-    output_prefix = output_prefix
-  }
 
   call SummaryStats {
     input:
@@ -78,8 +79,6 @@ workflow wes_chrom {
     Array[File] original_stats = OriginalStats.stats
     Array[File] filtered_stats = FilteredStats.stats
     Array[File] validation_reports = ValidateFiltering.report
-    File merged_vcf = SortAndMerge.merged_vcf
-    File merged_vcf_tbi = SortAndMerge.merged_vcf_tbi
     File summary_table = SummaryStats.summary
   }
 }
@@ -189,6 +188,46 @@ task ComputeStats {
   }
 }
 
+task PreFilter {
+  input {
+    File input_vcf
+    Int cpu_count
+  }
+
+  File input_vcf_tbi = input_vcf + ".tbi"
+  String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
+  Int disk_size = ceil(size(input_vcf, 'GB') * 2) + 20
+
+  command <<<
+  set -euo
+  THREADS=$(nproc)
+  touch ~{input_vcf_tbi}
+
+  echo "=== Pre-Filter: remove AC==0 and annotate IDs ==="
+  echo "Input: ~{input_vcf}"
+
+  TARGET_SIZE=$(stat -c%s ~{input_vcf})
+  bcftools view --threads $THREADS -i 'AC>0' ~{input_vcf} -Ou | \
+    bcftools annotate --threads $THREADS --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz | \
+    pv -s $TARGET_SIZE -N "prefilter" -i 60 > ~{base_name}.prefiltered.vcf.gz
+
+  tabix -p vcf ~{base_name}.prefiltered.vcf.gz
+  echo "=== Complete! ==="
+  >>>
+
+  output {
+    File prefiltered_vcf = "~{base_name}.prefiltered.vcf.gz"
+    File prefiltered_vcf_tbi = "~{base_name}.prefiltered.vcf.gz.tbi"
+  }
+
+  runtime {
+    memory: "8 GB"
+    disks: "local-disk ~{disk_size} HDD"
+    cpu: cpu_count
+    preemptible: 1
+  }
+}
+
 task ParallelFilterByRegion {
   input {
     File input_vcf
@@ -196,9 +235,11 @@ task ParallelFilterByRegion {
     String genotype_filter
     String variant_filter
     Int cpu_count
+    File norm_fasta
   }
 
   File input_vcf_tbi = input_vcf + ".tbi"
+  File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
   Int disk_size = ceil(size(input_vcf,'GB')*3) + 20
   Int vcf_size_gb = ceil(size(input_vcf, 'GB'))
@@ -207,13 +248,14 @@ task ParallelFilterByRegion {
                   else if vcf_size_gb <= 32 then 32
                   else if vcf_size_gb <= 64 then 64
                   else 128
-  
+
   command <<<
   set -euo
-  
+
   input_file="~{input_vcf}"
   CHUNKS=~{cpu_count}
   touch ~{input_vcf_tbi}
+  touch ~{norm_fasta_fai}
 
   echo "=== Parallel Filter by Region ==="
   echo "Input: $input_file"
@@ -262,7 +304,7 @@ task ParallelFilterByRegion {
     chunk_id=$(printf '%02d' $chunk_num)
     region=$(cat "region_chunk_${chunk_id}")
     cat >> commands.txt << EOF
-echo "Processing: chunk_${chunk_id} (region: $region)" && bcftools view "$input_file" -r "$region" -T "pos_chunk_${chunk_id}" -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${chunk_id}.vcf.gz" && echo "  ✓ Done: chunk_${chunk_id}"
+echo "Processing: chunk_${chunk_id} (region: $region)" && bcftools view "$input_file" -r "$region" -T "pos_chunk_${chunk_id}" -Ou | bcftools norm -f '~{norm_fasta}' -c x -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Oz -o "chunk_${chunk_id}.vcf.gz" && echo "  ✓ Done: chunk_${chunk_id}"
 EOF
     chunk_num=$((chunk_num + 1))
   done
@@ -302,52 +344,6 @@ EOF
   }
 }
 
-task SortAndMerge {
-  input {
-    Array[File] vcf_files
-    Array[File] vcf_tbi_files
-    Int cpu_count
-    String output_prefix
-  }
-
-  Int disk_size = ceil(size(vcf_files, 'GB') * 2) + 50
-  String out_vcf = output_prefix + ".merged.vcf.gz"
-  String out_tbi = output_prefix + ".merged.vcf.gz.tbi"
-  
-  command <<<
-  set -euo
-
-  echo "=== Sorting and Merging VCF Files ==="
-  echo "Number of input files: ~{length(vcf_files)}"
-  
-  # Create file list and sort by version
-  sort -V ~{write_lines(vcf_files)} > vcf_list.txt
-
-  # Touch all indices
-  while read -r tbi; do
-      touch "$tbi"
-  done < <(cat ~{write_lines(vcf_tbi_files)})
-
-  echo "Sorting VCF files by chromosome and position..."
-  bcftools concat -f vcf_list.txt -Oz -o ~{out_vcf} --threads ~{cpu_count}
-
-  echo "Indexing merged VCF..."
-  tabix -p vcf ~{out_vcf}
-  
-  echo "=== Merge Complete! ==="
-  >>>
-  output {
-    File merged_vcf = out_vcf
-    File merged_vcf_tbi = out_tbi
-  }
-
-  runtime {
-    memory: "16G"
-    disks: "local-disk ~{disk_size} HDD"
-    cpu: cpu_count
-    preemptible: 1
-  }
-}
 
 task ValidateFiltering {
   input {

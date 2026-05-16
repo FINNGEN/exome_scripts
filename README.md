@@ -81,14 +81,16 @@ This repository contains WDL (Workflow Description Language) workflows for proce
 
 1. Optionally subsets samples for testing (if `test_sample_count` is provided)
 2. Computes statistics on original VCFs (variant counts per chromosome)
-3. Parallel filters by region using position-based chunking:
+3. Pre-filters each VCF (`PreFilter` task):
+   - Removes AC=0 variants (monomorphic sites)
+   - Annotates variant IDs as `CHROM_POS_REF_ALT`
+4. Parallel filters by region using position-based chunking:
    - Splits each chromosome into equal chunks by variant positions
+   - **Normalises variants against reference FASTA** (`bcftools norm`) — done first before any other filters
    - Applies genotype filters (sets low-quality genotypes to missing)
    - Recalculates AC (allele count) after genotype filtering
    - Applies variant filters (removes variants with AC=0, etc.)
-   - Annotates variant IDs as `CHROM_POS_REF_ALT`
-4. Validates filtering on sample VCFs (checks filters worked correctly)
-5. Merges filtered VCFs across chromosomes
+5. Validates filtering on sample VCFs (checks filters worked correctly)
 6. Creates summary statistics showing variant counts and drop rates per chromosome
 
 **Key features:**
@@ -105,6 +107,7 @@ This repository contains WDL (Workflow Description Language) workflows for proce
   "genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
   "variant_filter": "AC>0 & ALT!=\"*\"",
   "cpu_count": 16,
+  "norm_fasta": "gs://bucket/reference.fa",
   "test_sample_count": 10  // Optional: subset to first N samples for testing
 }
 ```
@@ -142,10 +145,11 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 1. Optionally subsets samples for testing
 2. Computes chromosome counts for original VCF
 3. Filters each chromosome in parallel:
+   - **Normalises variants against reference FASTA** (`bcftools norm`) — done first before any other filters
    - Sets low-quality genotypes to missing
    - Recalculates AC
    - Filters variants by expression
-   - Annotates variant IDs
+   - Annotates variant IDs as `CHROM_POS_REF_ALT`
 4. Validates filtering worked correctly
 5. Outputs filtered VCF files
 
@@ -164,6 +168,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
   "genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
   "variant_filter": "AC>0 & ALT!=\"*\"",
   "cpu_count": 8,
+  "norm_fasta": "gs://bucket/reference.fa",
   "test_sample_count": 10  // Optional
 }
 ```
