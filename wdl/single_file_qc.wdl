@@ -73,8 +73,7 @@ task FilterByChromosome {
   String output_vcf = base_name + ".QC_ANNOTATED.vcf.gz"
   String output_tbi = base_name + ".QC_ANNOTATED.vcf.gz.tbi"
   Int disk_size = ceil(size(input_vcf, 'GB') * 3) + 20
-  Int vcf_size_gb = ceil(size(input_vcf, 'GB'))
-  Int memory_gb = if vcf_size_gb < 8 then 8 else vcf_size_gb
+  Int memory_gb = cpu_count * 2 + 4
 
   command <<<
   set -euo

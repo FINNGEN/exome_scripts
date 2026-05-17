@@ -242,12 +242,7 @@ task ParallelFilterByRegion {
   File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
   Int disk_size = ceil(size(input_vcf,'GB')*3) + 20
-  Int vcf_size_gb = ceil(size(input_vcf, 'GB'))
-  Int memory_gb = if vcf_size_gb <= 8 then 8
-                  else if vcf_size_gb <= 16 then 16
-                  else if vcf_size_gb <= 32 then 32
-                  else if vcf_size_gb <= 64 then 64
-                  else 128
+  Int memory_gb = cpu_count * 2 + 4
 
   command <<<
   set -euo
