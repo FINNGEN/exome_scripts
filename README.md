@@ -86,7 +86,7 @@ This repository contains WDL (Workflow Description Language) workflows for proce
    - Annotates variant IDs as `CHROM_POS_REF_ALT`
 4. Parallel filters by region using position-based chunking:
    - Splits each chromosome into equal chunks by variant positions
-   - **Normalises variants against reference FASTA** (`bcftools norm`) — done first before any other filters
+   - **Splits multiallelics** (`bcftools norm -m -any`) and **normalises against reference FASTA** (`bcftools norm -c x`) — done first before any other filters
    - Applies genotype filters (sets low-quality genotypes to missing)
    - Recalculates AC (allele count) after genotype filtering
    - Applies variant filters (removes variants with AC=0, etc.)
@@ -145,7 +145,9 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 1. Optionally subsets samples for testing
 2. Computes chromosome counts for original VCF
 3. Filters each chromosome in parallel:
-   - **Normalises variants against reference FASTA** (`bcftools norm`) — done first before any other filters
+   - **Auto-detects chromosome naming** — if the VCF uses non-prefixed names (`1`, `22`) instead of `chr1`, `chr22`, chromosomes are permanently renamed to `chr`-prefix in the output so both VCF types produce consistently named output
+   - Strips null bytes (`tr -d '\0'`) to handle corrupt FORMAT fields
+   - **Splits multiallelics** (`bcftools norm -m -any`) and **normalises against reference FASTA** (`bcftools norm -c x`)
    - Sets low-quality genotypes to missing
    - Recalculates AC
    - Filters variants by expression
@@ -157,6 +159,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 
 - Processes **whole genome files** (not pre-split by chromosome)
 - Uses **chromosome-based parallelization** instead of position chunking
+- Works with both **chr-prefixed** (e.g. ADPKD) and **non-prefixed** (e.g. BOTNIA) VCFs — output is always chr-prefixed
 - No merging step (outputs remain per-chromosome)
 - Simpler workflow for whole genome data
 

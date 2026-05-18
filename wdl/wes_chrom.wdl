@@ -242,7 +242,7 @@ task ParallelFilterByRegion {
   File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
   Int disk_size = ceil(size(input_vcf,'GB')*3) + 20
-  Int memory_gb = cpu_count * 2 + 4
+  Int memory_gb = 64
 
   command <<<
   set -euo
@@ -299,7 +299,7 @@ task ParallelFilterByRegion {
     chunk_id=$(printf '%02d' $chunk_num)
     region=$(cat "region_chunk_${chunk_id}")
     cat >> commands.txt << EOF
-echo "Processing: chunk_${chunk_id} (region: $region)" && bcftools view "$input_file" -r "$region" -T "pos_chunk_${chunk_id}" -Ou | bcftools norm -f '~{norm_fasta}' -c x -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Oz -o "chunk_${chunk_id}.vcf.gz" && echo "  ✓ Done: chunk_${chunk_id}"
+echo "Processing: chunk_${chunk_id} (region: $region)" && bcftools view "$input_file" -r "$region" -T "pos_chunk_${chunk_id}" -Ou | bcftools norm -f '~{norm_fasta}' -m -any -c x -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Oz -o "chunk_${chunk_id}.vcf.gz" && echo "  ✓ Done: chunk_${chunk_id}"
 EOF
     chunk_num=$((chunk_num + 1))
   done

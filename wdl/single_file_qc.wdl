@@ -81,71 +81,95 @@ task FilterByChromosome {
   input_file="~{input_vcf}"
   touch ~{input_vcf_index}
   touch ~{norm_fasta_fai}
-  # Use nproc-1 to leave buffer for system overhead
   CHUNKS=$(( $(nproc) - 1 ))
   if [ $CHUNKS -lt 1 ]; then CHUNKS=1; fi
-  
+
   echo "=== Parallel Filter by Chromosome ==="
-  echo "Input: $input_file"
-  echo "Output: ~{output_vcf}"
+  echo "Input:           $input_file"
+  echo "Output:          ~{output_vcf}"
   echo "Genotype filter: ~{genotype_filter}"
-  echo "Variant filter: ~{variant_filter}"
-  echo "CPU cores: $CHUNKS"
+  echo "Variant filter:  ~{variant_filter}"
+  echo "CPU cores:       $CHUNKS"
   echo ""
-  
-  # Get list of chromosomes from the VCF index
-  echo "Extracting chromosome list..."
+
   mapfile -t chromosomes < <(bcftools index -s "$input_file" | awk '{print $1}')
   num_chroms=${#chromosomes[@]}
-  
   echo "Found $num_chroms chromosomes: ${chromosomes[*]}"
-  
+
   if [[ $num_chroms -eq 0 ]]; then
-      echo "Error: No chromosomes found in VCF"
-      exit 1
+    echo "Error: No chromosomes found in VCF"
+    exit 1
   fi
 
-  # Create chromosome list file for parallel processing
   echo "Processing $num_chroms chromosomes in parallel (max $CHUNKS jobs)..."
   echo ""
-  
-  # Create a file with complete bcftools commands for each chromosome
-  rm -f commands.txt
+
+  # Detect chromosome naming: if VCF uses non-chr names, rename to chr prefix in output
+  FIRST_CHROM=$(bcftools index -s "$input_file" | awk 'NR==1{print $1}')
+  RENAME_TO_CHR=""
+  if [[ "$FIRST_CHROM" != chr* ]]; then
+    echo "VCF uses non-chr chromosome names — renaming to chr prefix in output"
+    RENAME_TO_CHR=$(mktemp)
+    for i in $(seq 1 22) X Y MT M; do
+      echo "$i chr$i" >> "$RENAME_TO_CHR"
+    done
+  fi
+
+  # Generate per-chromosome scripts and run in parallel
+  # Variables expand at generation time — no quoting or function-export issues
+  SCRIPT_DIR=$(mktemp -d)
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
-    cat >> commands.txt << EOF
-echo "Processing: $chrom" && bcftools view -r "{$chrom}" "$input_file" -Ou | bcftools norm -f '~{norm_fasta}' -c x -Ou | bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | bcftools +fill-tags -Ou -- -t AC | bcftools view -i '~{variant_filter}' -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "chunk_${safe_chrom}.vcf.gz" && echo "  ✓ Done: $chrom"
-EOF
+    output="chunk_${safe_chrom}.vcf.gz"
+    if [[ -n "$RENAME_TO_CHR" ]]; then
+      cat > "${SCRIPT_DIR}/run_${safe_chrom}.sh" << SCRIPT
+#!/bin/bash
+echo "Processing chromosome: ${chrom}"
+bcftools view -r "${chrom}" "${input_file}" | \\
+    tr -d '\0' | \\
+    bcftools annotate --rename-chrs "${RENAME_TO_CHR}" -Ou | \\
+    bcftools norm -f '~{norm_fasta}' -m -any -c x -Ou | \\
+    bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | \\
+    bcftools +fill-tags -Ou -- -t AC | \\
+    bcftools view -i '~{variant_filter}' -Ou | \\
+    bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "${output}"
+echo "Completed chromosome: ${chrom}"
+SCRIPT
+    else
+      cat > "${SCRIPT_DIR}/run_${safe_chrom}.sh" << SCRIPT
+#!/bin/bash
+echo "Processing chromosome: ${chrom}"
+bcftools view -r "${chrom}" "${input_file}" | \\
+    tr -d '\0' | \\
+    bcftools norm -f '~{norm_fasta}' -m -any -c x -Ou | \\
+    bcftools +setGT -Ou -- -t q -n . -i '~{genotype_filter}' | \\
+    bcftools +fill-tags -Ou -- -t AC | \\
+    bcftools view -i '~{variant_filter}' -Ou | \\
+    bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o "${output}"
+echo "Completed chromosome: ${chrom}"
+SCRIPT
+    fi
   done
-  
-  echo "Sample commands (first 5):"
-  head -5 commands.txt
-  echo ""
-  echo "Sample HLA commands:"
-  grep "HLA" commands.txt | head -3 || echo "No HLA chromosomes found"
-  echo ""
-  
-  # Execute all commands in parallel
-  parallel -j "$CHUNKS" < commands.txt
-  
+
+  ls "${SCRIPT_DIR}"/run_*.sh | parallel -j "$CHUNKS" 'bash {}'
+  rm -rf "$SCRIPT_DIR"
+
   echo ""
   echo "Concatenating chromosomes in original order..."
-  # Build ordered list of chunk files based on chromosome order
   rm -f chunk_list.txt
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
     echo "chunk_${safe_chrom}.vcf.gz" >> chunk_list.txt
   done
-  
-  # Concatenate in chromosome order
+
   bcftools concat -n -Oz -o ~{output_vcf} -f chunk_list.txt
-  
+
   echo "Indexing final output..."
   tabix -p vcf ~{output_vcf}
 
   # Cleanup
-  echo "Cleaning up temporary files..."
-  rm -f chunk_*.vcf.gz commands.txt chunk_list.txt
+  rm -f chunk_*.vcf.gz chunk_list.txt
+  [[ -n "$RENAME_TO_CHR" ]] && rm -f "$RENAME_TO_CHR"
   echo "=== Complete! ==="
   >>>
 
