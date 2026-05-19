@@ -301,7 +301,7 @@ task SortAndMerge {
   cat ~{write_lines(vcf_files)} > unsorted_vcf_list.txt
   
   # Sort by chromosome (extract chr from filename and sort naturally)
-  sort -V unsorted_vcf_list.txt > sorted_vcf_list.txt
+  awk -F'/' '{print $NF"\t"$0}' unsorted_vcf_list.txt | sort -V | cut -f2- > sorted_vcf_list.txt
   
   echo "Sorted VCF files:"
   cat sorted_vcf_list.txt

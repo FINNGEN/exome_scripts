@@ -460,10 +460,7 @@ task ValidateFiltering {
   }
 
   runtime {
-    memory: "4G"
     disks: "local-disk ~{disk_size} HDD"
-    cpu: 1
-    preemptible: 1
   }
 }
 
@@ -534,7 +531,8 @@ task ConcatVcfs {
   while IFS= read -r tbi; do touch "$tbi"; done < ~{write_lines(input_vcf_tbis)}
 
   echo "=== Concatenating VCF shards ==="
-  bcftools concat --threads $THREADS -f ~{write_lines(input_vcfs)} -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
+  awk -F'/' '{print $NF"\t"$0}' ~{write_lines(input_vcfs)} | sort -V | cut -f2- > sorted_vcf_list.txt
+  bcftools concat --threads $THREADS -f sorted_vcf_list.txt -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
 
   echo "Indexing..."
   tabix -p vcf ~{root_name}.QC_ANNOTATED.vcf.gz
@@ -552,8 +550,7 @@ task ConcatVcfs {
   runtime {
     memory: "8 GB"
     disks: "local-disk ~{disk_size} HDD"
-    cpu: 4
-    preemptible: 1
+    cpu: 16
   }
 }
 
@@ -563,8 +560,6 @@ task SummaryStats {
     Array[File] original_stats
     Array[File] filtered_stats
   }
-
-  Int disk_size = 10
 
   command <<<
   set -euo
@@ -641,7 +636,7 @@ EOF
 
   runtime {
     memory: "2G"
-    disks: "local-disk ~{disk_size} HDD"
+    disks: "local-disk 10 HDD"
     cpu: 1
     preemptible: 1
   }
