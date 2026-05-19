@@ -7,7 +7,6 @@ workflow wes_chrom {
     String variant_filter
     Int cpu_count
     Int? test_sample_count
-    String output_prefix
     File norm_fasta
    }
 
@@ -73,13 +72,23 @@ workflow wes_chrom {
       filtered_stats = FilteredStats.stats
   }
 
+  call ConcatVcfs {
+    input:
+      input_vcfs = ParallelFilterByRegion.filtered_vcf,
+      input_vcf_tbis = ParallelFilterByRegion.filtered_vcf_tbi,
+      summary_report = SummaryStats.report,
+      root_name = SummaryStats.root_name
+  }
+
   output {
     Array[File] filtered_vcfs = ParallelFilterByRegion.filtered_vcf
     Array[File] filtered_vcf_tbis = ParallelFilterByRegion.filtered_vcf_tbi
     Array[File] original_stats = OriginalStats.stats
     Array[File] filtered_stats = FilteredStats.stats
     Array[File] validation_reports = ValidateFiltering.report
-    File summary_table = SummaryStats.summary
+    File report = ConcatVcfs.report
+    File concatenated_vcf = ConcatVcfs.concatenated_vcf
+    File concatenated_vcf_tbi = ConcatVcfs.concatenated_vcf_tbi
   }
 }
 
@@ -507,6 +516,47 @@ task SubsetSamples {
   }
 }
 
+task ConcatVcfs {
+  input {
+    Array[File] input_vcfs
+    Array[File] input_vcf_tbis
+    File summary_report
+    String root_name
+  }
+
+  Int disk_size = ceil(size(input_vcfs, 'GB') * 2) + 20
+
+  command <<<
+  set -euo
+  THREADS=$(nproc)
+
+  # Touch indices to ensure localization
+  while IFS= read -r tbi; do touch "$tbi"; done < ~{write_lines(input_vcf_tbis)}
+
+  echo "=== Concatenating VCF shards ==="
+  bcftools concat --threads $THREADS -f ~{write_lines(input_vcfs)} -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
+
+  echo "Indexing..."
+  tabix -p vcf ~{root_name}.QC_ANNOTATED.vcf.gz
+
+  cp ~{summary_report} ~{root_name}.QC_ANNOTATED.report.txt
+  echo "=== Complete ==="
+  >>>
+
+  output {
+    File concatenated_vcf = "~{root_name}.QC_ANNOTATED.vcf.gz"
+    File concatenated_vcf_tbi = "~{root_name}.QC_ANNOTATED.vcf.gz.tbi"
+    File report = "~{root_name}.QC_ANNOTATED.report.txt"
+  }
+
+  runtime {
+    memory: "8 GB"
+    disks: "local-disk ~{disk_size} HDD"
+    cpu: 4
+    preemptible: 1
+  }
+}
+
 task SummaryStats {
   input {
     Array[String] vcf_file_names
@@ -520,9 +570,16 @@ task SummaryStats {
   set -euo
 
   echo "=== Creating Summary Statistics ==="
-  
+
+  # Derive root name from first VCF: strip _chrN.vcf.gz (or .vcf.bgz/.bcf)
+  first_vcf=$(head -1 ~{write_lines(vcf_file_names)})
+  filename=$(basename "$first_vcf")
+  root=$(echo "$filename" | sed -E 's/_chr[0-9XYxy]+\.(vcf\.gz|vcf\.bgz|bcf)$//')
+  echo "$root" > root_name.txt
+  echo "Root name: $root"
+
   # Create header
-  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.tsv
+  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.report.txt
   
   # Process each VCF file
   idx=0
@@ -555,7 +612,7 @@ task SummaryStats {
       pct_dropped="0.00"
     fi
     
-    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.tsv
+    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.report.txt
     idx=$((idx + 1))
   done < <(cat << 'EOF'
 ~{sep='\n' vcf_file_names}
@@ -563,22 +620,23 @@ EOF
 )
   
   # Add totals row
-  echo "" >> summary.tsv
+  echo "" >> summary.report.txt
   total_orig=$(grep "variant_count" ~{sep=' ' original_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_filt=$(grep "variant_count" ~{sep=' ' filtered_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_pct=$(awk "BEGIN {printf \"%.2f\", (($total_orig - $total_filt) / $total_orig) * 100}")
   
-  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.tsv
+  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.report.txt
   
   echo ""
   echo "Summary Table:"
-  column -t summary.tsv
+  column -t summary.report.txt
   
   echo "=== Complete ==="
   >>>
 
   output {
-    File summary = "summary.tsv"
+    String root_name = read_string("root_name.txt")
+    File report = "summary.report.txt"
   }
 
   runtime {
