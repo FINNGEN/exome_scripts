@@ -81,8 +81,8 @@ task FilterByChromosome {
   touch "~{input_vcf_index}"
   touch "~{norm_fasta_fai}"
   NORM_FASTA="~{norm_fasta}"
-  GENOTYPE_FILTER="~{genotype_filter}"
-  VARIANT_FILTER="~{variant_filter}"
+  GENOTYPE_FILTER='~{genotype_filter}'
+  VARIANT_FILTER='~{variant_filter}'
   OUTPUT_VCF="~{output_vcf}"
   chromosomes=()
   CHUNKS=$(( $(nproc) - 1 ))
@@ -174,7 +174,7 @@ SCRIPT
   }
 
   runtime {
-    memory: "~{memory_gb}G"
+    memory: "~{memory_gb} GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu_count
     preemptible: 1
@@ -190,12 +190,9 @@ task ComputeStats {
 
   command <<<
   set -euo
-
   echo "=== Computing chromosome statistics ==="
-
   # Extract unique chromosomes with counts
   bcftools query -f '%CHROM\n' "~{input_vcf}" | sort | uniq -c | awk '{print $2"\t"$1}' > chrom_counts.txt
-
   echo "Found $(wc -l < chrom_counts.txt) chromosomes"
   >>>
 
@@ -204,10 +201,7 @@ task ComputeStats {
   }
 
   runtime {
-    memory: "4G"
     disks: "local-disk ~{disk_size} HDD"
-    cpu: 1
-    preemptible: 1
   }
 }
 
@@ -385,10 +379,7 @@ task SubsetSamples {
   }
 
   runtime {
-    memory: "8G"
     disks: "local-disk ~{disk_size} HDD"
-    cpu: 4
-    preemptible: 1
   }
 }
 
