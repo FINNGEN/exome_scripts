@@ -44,18 +44,20 @@ workflow daly_qc {
     }
   }
 
-  call SortAndMerge {
-    input:
-      vcf_files = ParallelFilter.filtered_vcf,
-      vcf_tbi_files = ParallelFilter.filtered_vcf_tbi,
-      cpu_count = cpu_count
-  }
-
   call SummaryStats {
     input:
       vcf_file_names = vcf_files,
       original_stats = OriginalStats.stats,
       filtered_stats = FilteredStats.stats
+  }
+
+  call SortAndMerge {
+    input:
+      vcf_files = ParallelFilter.filtered_vcf,
+      vcf_tbi_files = ParallelFilter.filtered_vcf_tbi,
+      summary_report = SummaryStats.report,
+      root_name = SummaryStats.root_name,
+      cpu_count = cpu_count
   }
 
   output {
@@ -66,7 +68,7 @@ workflow daly_qc {
     Array[File] validation_reports = ValidateFiltering.report
     File merged_vcf = SortAndMerge.merged_vcf
     File merged_vcf_tbi = SortAndMerge.merged_vcf_tbi
-    File summary_table = SummaryStats.summary
+    File report = SortAndMerge.report
   }
 }
 
@@ -285,40 +287,40 @@ task SortAndMerge {
   input {
     Array[File] vcf_files
     Array[File] vcf_tbi_files
+    File summary_report
+    String root_name
     Int cpu_count = 8
   }
 
-  String first_file = basename(vcf_files[0])
-  String base_name = sub(sub(first_file, "\\.vcf\\.(gz|bgz)$", ""), "_chr[0-9XY]+$", "")
-  String output_vcf = base_name + ".vcf.gz"
-  String output_tbi = base_name + ".vcf.gz.tbi"
-  
   Int disk_size = ceil(size(vcf_files,'GB')*2) + 50
-  
+
   command <<<
-  
+
   # Create file list
   cat ~{write_lines(vcf_files)} > unsorted_vcf_list.txt
-  
-  # Sort by chromosome (extract chr from filename and sort naturally)
+
+  # Sort by filename (handles mixed cached/fresh GCS paths)
   awk -F'/' '{print $NF"\t"$0}' unsorted_vcf_list.txt | sort -V | cut -f2- > sorted_vcf_list.txt
-  
+
   echo "Sorted VCF files:"
   cat sorted_vcf_list.txt
-  echo "Output filename: ~{output_vcf}"
-  
+  echo "Output filename: ~{root_name}.QC_ANNOTATED.vcf.gz"
+
   echo "Concatenating sorted chromosomes..."
-  bcftools concat -f sorted_vcf_list.txt -Oz -o ~{output_vcf}
-  
+  bcftools concat -f sorted_vcf_list.txt -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
+
   echo "Indexing merged VCF..."
-  tabix -p vcf ~{output_vcf}
-  
-  echo "Done! Output file: ~{output_vcf}"
+  tabix -p vcf ~{root_name}.QC_ANNOTATED.vcf.gz
+
+  cp ~{summary_report} ~{root_name}.QC_ANNOTATED.report.txt
+
+  echo "Done! Output file: ~{root_name}.QC_ANNOTATED.vcf.gz"
   >>>
 
   output {
-    File merged_vcf = output_vcf
-    File merged_vcf_tbi = output_tbi
+    File merged_vcf = "~{root_name}.QC_ANNOTATED.vcf.gz"
+    File merged_vcf_tbi = "~{root_name}.QC_ANNOTATED.vcf.gz.tbi"
+    File report = "~{root_name}.QC_ANNOTATED.report.txt"
   }
 
   runtime {
@@ -393,9 +395,16 @@ task SummaryStats {
   set -euo
 
   echo "=== Creating Summary Statistics ==="
-  
+
+  # Derive root name from first VCF: strip _chrN.vcf.gz (or .vcf.bgz/.bcf)
+  first_vcf=$(head -1 ~{write_lines(vcf_file_names)})
+  filename=$(basename "$first_vcf")
+  root=$(echo "$filename" | sed -E 's/_chr[0-9XYxy]+\.(vcf\.gz|vcf\.bgz|bcf)$//')
+  echo "$root" > root_name.txt
+  echo "Root name: $root"
+
   # Create header
-  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.tsv
+  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.report.txt
   
   # Process each VCF file
   idx=0
@@ -428,7 +437,7 @@ task SummaryStats {
       pct_dropped="0.00"
     fi
     
-    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.tsv
+    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.report.txt
     idx=$((idx + 1))
   done < <(cat << 'EOF'
 ~{sep='\n' vcf_file_names}
@@ -436,22 +445,23 @@ EOF
 )
   
   # Add totals row
-  echo "" >> summary.tsv
+  echo "" >> summary.report.txt
   total_orig=$(grep "variant_count" ~{sep=' ' original_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_filt=$(grep "variant_count" ~{sep=' ' filtered_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_pct=$(awk "BEGIN {printf \"%.2f\", (($total_orig - $total_filt) / $total_orig) * 100}")
   
-  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.tsv
+  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.report.txt
   
   echo ""
   echo "Summary Table:"
-  column -t summary.tsv
+  column -t summary.report.txt
   
   echo "=== Complete ==="
   >>>
 
   output {
-    File summary = "summary.tsv"
+    String root_name = read_string("root_name.txt")
+    File report = "summary.report.txt"
   }
 
   runtime {

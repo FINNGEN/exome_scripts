@@ -20,7 +20,7 @@ This section summarizes the datasets and processing steps required to merge them
 #### ADPKD
 - **Samples**: 629 samples with FG IDs
 - **Status**: Merged by Lea and released to red sandbox
-- **Issues**: Required re-heading (bcftools warnings): `[W::bcf_hdr_check_sanity] PL should be declared as Number=G`'. Also the data had the original "generic" sample ids, so I put the known FGids in teh header via `~/fg-3/exome/data/ADPKD-FG3_WES_2024/ADPKD_B1_B2_fgid_sampleid.txt`
+- **Issues**: Required re-heading (bcftools warnings): `[W::bcf_hdr_check_sanity] PL should be declared as Number=G`'. 
 - **QC Approach**: Contains AC, DP, and GQ fields for standard filtering
 - **Sample Matching**:
 
