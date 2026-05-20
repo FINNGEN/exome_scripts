@@ -1,5 +1,5 @@
 #!/bin/bash
-set -eu
+set -euo
 
 usage() {
   echo "Usage: $0 <input.vcf.gz> [--chroms chr1 chr2 ...] [--cpus N] [--norm-fasta FILE] [--genotype-filter EXPR] [--variant-filter EXPR]"
