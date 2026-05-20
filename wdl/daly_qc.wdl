@@ -343,16 +343,13 @@ task ComputeStats {
   set -euo
 
   echo "=== Computing variant count ==="
-  
-  # Touch index to ensure it's localized
+
   touch ~{input_vcf_tbi}
-  
-  # Get chromosome from first variant
-  chrom=$(bcftools query -f '%CHROM\n' "~{input_vcf}" | head -n 1)
+
+  chrom=$(bcftools index -s "~{input_vcf}" | head -n 1 | cut -f1)
   echo "Chromosome: $chrom"
 
-  # Count total variants
-  variant_count=$(bcftools view -H "~{input_vcf}" | wc -l)
+  variant_count=$(bcftools index -s "~{input_vcf}" | awk 'NR==1{print $3}')
   echo "Total variants: $variant_count"
   
   # Create a small sample VCF (100 variants) for chromosome validation

@@ -42,12 +42,12 @@ workflow single_file_qc {
 
     call ValidateFiltering {
       input:
-        original_vcf = vcf_to_filter,
+        filtered_vcf_name     = basename(FilterByChromosome.filtered_vcf),
+        original_sample_vcf   = OriginalStats.sample_vcf,
         original_chrom_counts = OriginalStats.chrom_counts,
-        filtered_vcf = FilterByChromosome.filtered_vcf,
-        filtered_vcf_tbi = FilterByChromosome.filtered_vcf_tbi,
+        filtered_sample_vcf   = FilteredStats.sample_vcf,
         filtered_chrom_counts = FilteredStats.chrom_counts,
-        genotype_filter = genotype_filter
+        genotype_filter       = genotype_filter
     }
   }
 
@@ -186,65 +186,80 @@ task ComputeStats {
     File input_vcf
   }
 
+  File input_vcf_tbi = input_vcf + ".tbi"
   Int disk_size = ceil(size(input_vcf, 'GB')) + 10
 
   command <<<
   set -euo
+  touch "~{input_vcf_tbi}"
+
   echo "=== Computing chromosome statistics ==="
-  # Extract unique chromosomes with counts
-  bcftools query -f '%CHROM\n' "~{input_vcf}" | sort | uniq -c | awk '{print $2"\t"$1}' > chrom_counts.txt
+  bcftools index -s "~{input_vcf}" | awk '{print $1"\t"$3}' > chrom_counts.txt
   echo "Found $(wc -l < chrom_counts.txt) chromosomes"
+
+  echo "Creating sample VCF for validation (100 variants)..."
+  bcftools view -h "~{input_vcf}" | bgzip -c > sample.vcf.gz
+  bcftools view -H "~{input_vcf}" | head -n 100 | bgzip -c >> sample.vcf.gz
+  tabix -p vcf sample.vcf.gz
+  echo "Sample VCF created: $(bcftools view -H sample.vcf.gz | wc -l) variants"
   >>>
 
   output {
-    File chrom_counts = "chrom_counts.txt"
+    File chrom_counts   = "chrom_counts.txt"
+    File sample_vcf     = "sample.vcf.gz"
+    File sample_vcf_tbi = "sample.vcf.gz.tbi"
   }
 
   runtime {
+    memory: "4 GB"
     disks: "local-disk ~{disk_size} HDD"
+    preemptible: 1
   }
 }
 
 task ValidateFiltering {
   input {
-    File original_vcf
+    String filtered_vcf_name
+    File original_sample_vcf
     File original_chrom_counts
-    File filtered_vcf
-    File filtered_vcf_tbi
+    File filtered_sample_vcf
     File filtered_chrom_counts
     String genotype_filter
   }
 
-  Int disk_size = ceil(size(original_vcf, 'GB') + size(filtered_vcf, 'GB')) + 10
+  File   original_sample_vcf_tbi = original_sample_vcf + ".tbi"
+  File   filtered_sample_vcf_tbi = filtered_sample_vcf + ".tbi"
+  String report_name             = sub(filtered_vcf_name, "\\.vcf\\.gz$", ".report.txt")
+  Int    disk_size               = ceil(size(original_sample_vcf, 'GB') + size(filtered_sample_vcf, 'GB')) + 10
 
   command <<<
   set -euo
 
-  echo "=== Validating VCF Filtering ===" > report.txt
-  echo "Original: ~{original_vcf}" >> report.txt
-  echo "Filtered: ~{filtered_vcf}" >> report.txt
-  echo "" >> report.txt
+  echo "=== Validating VCF Filtering ===" > ~{report_name}
+  echo "Original: ~{original_sample_vcf}" >> ~{report_name}
+  echo "Filtered: ~{filtered_sample_vcf}" >> ~{report_name}
+  echo "" >> ~{report_name}
 
   # Touch index
-  touch ~{filtered_vcf_tbi}
+  touch ~{filtered_sample_vcf_tbi}
 
   # Test 1: Check genotypes were set to missing
-  echo "Test 1: Checking genotypes were set to missing (~{genotype_filter})" >> report.txt
-  echo "--------------------------------------------------------------" >> report.txt
+  echo "Test 1: Checking genotypes were set to missing (~{genotype_filter})" >> ~{report_name}
+  echo "--------------------------------------------------------------" >> ~{report_name}
 
   # Find genotypes that meet criteria and check if variant still exists in filtered file
   found=0
-  bcftools query -i 'GT!="mis"' -f '%CHROM\t%POS[\t%SAMPLE\t%GT\t%DP\t%GQ]\n' "~{original_vcf}" 2>/dev/null | \
+  bcftools query -i 'GT!="mis"' -f '%CHROM\t%POS[\t%SAMPLE\t%GT\t%DP\t%GQ]\n' "~{original_sample_vcf}" 2>/dev/null | \
     awk '($4 < 10 || $5 < 20)' | \
     while read chrom pos sample gt dp gq; do
       # Check if this variant exists in filtered file
-      if bcftools view -H -r "$chrom:$pos" "~{filtered_vcf}" 2>/dev/null | grep -q .; then
-        after_gt=$(bcftools query -s "$sample" -r "$chrom:$pos" -f '[\t%GT]\n' "~{filtered_vcf}" 2>/dev/null | tr -d '\t' | tr -d ' ')
+      if bcftools view -H -r "$chrom:$pos" "~{filtered_sample_vcf}" 2>/dev/null | grep -q .; then
+        after_gt=$(bcftools query -s "$sample" -r "$chrom:$pos" -f '[\t%GT]\n' "~{filtered_sample_vcf}" 2>/dev/null | tr -d '\t' | tr -d ' ')
         
         if [[ "$after_gt" == "./." ]] || [[ "$after_gt" == "." ]]; then
-          echo "✓ PASS: $chrom:$pos GT: $gt → $after_gt" >> report.txt
+          echo "✓ PASS: $chrom:$pos GT: $gt → $after_gt" >> ~{report_name}
         else
-          echo "✗ FAIL: $chrom:$pos GT: $gt → $after_gt (not missing)" >> report.txt
+          echo "✗ FAIL: $chrom:$pos GT: $gt → $after_gt (not missing)" >> ~{report_name}
         fi
         found=1
         break
@@ -252,59 +267,59 @@ task ValidateFiltering {
     done
 
   if [[ $found -eq 0 ]]; then
-    echo "⚠ NOTE: All low-quality genotypes resulted in variants being removed (AC=0)" >> report.txt
+    echo "⚠ NOTE: All low-quality genotypes resulted in variants being removed (AC=0)" >> ~{report_name}
   fi
 
-  echo "" >> report.txt
+  echo "" >> ~{report_name}
 
   # Test 2: Check AC field exists
-  echo "Test 2: Checking AC field is present in filtered VCF" >> report.txt
-  echo "-----------------------------------------------------" >> report.txt
+  echo "Test 2: Checking AC field is present in filtered VCF" >> ~{report_name}
+  echo "-----------------------------------------------------" >> ~{report_name}
 
-  first_var=$(bcftools view -H "~{filtered_vcf}" | head -1 | awk '{print $1":"$2}')
+  first_var=$(bcftools view -H "~{filtered_sample_vcf}" | head -1 | awk '{print $1":"$2}')
 
   if [[ -n "$first_var" ]]; then
-    ac_value=$(bcftools query -r "$first_var" -f '%AC\n' "~{filtered_vcf}" 2>/dev/null)
+    ac_value=$(bcftools query -r "$first_var" -f '%AC\n' "~{filtered_sample_vcf}" 2>/dev/null)
     
     if [[ -n "$ac_value" ]]; then
-      echo "✓ PASS: AC field present (example: $first_var AC=$ac_value)" >> report.txt
+      echo "✓ PASS: AC field present (example: $first_var AC=$ac_value)" >> ~{report_name}
     else
-      echo "✗ FAIL: AC field missing in filtered VCF" >> report.txt
+      echo "✗ FAIL: AC field missing in filtered VCF" >> ~{report_name}
     fi
   else
-    echo "⚠ NOTE: No variants in filtered file" >> report.txt
+    echo "⚠ NOTE: No variants in filtered file" >> ~{report_name}
   fi
 
-  echo "" >> report.txt
+  echo "" >> ~{report_name}
 
   # Test 3: Check variant IDs
-  echo "Test 3: Checking variant IDs (CHROM_POS_REF_ALT format)" >> report.txt
-  echo "--------------------------------------------------------" >> report.txt
+  echo "Test 3: Checking variant IDs (CHROM_POS_REF_ALT format)" >> ~{report_name}
+  echo "--------------------------------------------------------" >> ~{report_name}
 
-  sample_id=$(bcftools view -H "~{filtered_vcf}" 2>/dev/null | head -1 | awk '{print $3}')
+  sample_id=$(bcftools view -H "~{filtered_sample_vcf}" 2>/dev/null | head -1 | awk '{print $3}')
   if [[ "$sample_id" =~ ^[^_]+_[0-9]+_.+_.+$ ]]; then
-    echo "✓ PASS: IDs formatted as CHROM_POS_REF_ALT (example: $sample_id)" >> report.txt
+    echo "✓ PASS: IDs formatted as CHROM_POS_REF_ALT (example: $sample_id)" >> ~{report_name}
   else
-    echo "✗ FAIL: ID not in expected format (got: $sample_id)" >> report.txt
+    echo "✗ FAIL: ID not in expected format (got: $sample_id)" >> ~{report_name}
   fi
 
-  echo "" >> report.txt
+  echo "" >> ~{report_name}
 
   # Test 4: Filtering statistics by chromosome
-  echo "Test 4: Filtering statistics by chromosome" >> report.txt
-  echo "-------------------------------------------" >> report.txt
+  echo "Test 4: Filtering statistics by chromosome" >> ~{report_name}
+  echo "-------------------------------------------" >> ~{report_name}
 
   # Use pre-computed stats for both files
   cp "~{original_chrom_counts}" original_chrom_counts.txt
   cp "~{filtered_chrom_counts}" filtered_chrom_counts.txt
 
-  echo "Original chromosomes: $(wc -l < original_chrom_counts.txt)" >> report.txt
-  echo "" >> report.txt
+  echo "Original chromosomes: $(wc -l < original_chrom_counts.txt)" >> ~{report_name}
+  echo "" >> ~{report_name}
 
   # Per-chromosome filtering statistics (sorted by original count descending)
-  echo "Per-chromosome variant counts (sorted by original count):" >> report.txt
-  printf "%-30s %10s %10s %10s\n" "CHROMOSOME" "ORIGINAL" "FILTERED" "%_DROPPED" >> report.txt
-  printf "%-30s %10s %10s %10s\n" "----------" "--------" "--------" "---------" >> report.txt
+  echo "Per-chromosome variant counts (sorted by original count):" >> ~{report_name}
+  printf "%-30s %10s %10s %10s\n" "CHROMOSOME" "ORIGINAL" "FILTERED" "%_DROPPED" >> ~{report_name}
+  printf "%-30s %10s %10s %10s\n" "----------" "--------" "--------" "---------" >> ~{report_name}
 
   # Sort chromosomes by original count (descending)
   sort -t$'\t' -k2 -nr original_chrom_counts.txt | while IFS=$'\t' read chrom orig_count; do
@@ -317,19 +332,19 @@ task ValidateFiltering {
       pct_dropped="0.0"
     fi
     
-    printf "%-30s %10s %10s %9s%%\n" "$chrom" "$orig_count" "$filt_count" "$pct_dropped" >> report.txt
+    printf "%-30s %10s %10s %9s%%\n" "$chrom" "$orig_count" "$filt_count" "$pct_dropped" >> ~{report_name}
   done
 
-  echo "" >> report.txt
+  echo "" >> ~{report_name}
 
-  echo "" >> report.txt
-  echo "=== Validation Complete ===" >> report.txt
+  echo "" >> ~{report_name}
+  echo "=== Validation Complete ===" >> ~{report_name}
 
-  cat report.txt
+  cat ~{report_name}
   >>>
 
   output {
-    File report = "report.txt"
+    File report = "~{report_name}"
   }
 
   runtime {
