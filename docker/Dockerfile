@@ -9,5 +9,8 @@ RUN mkdir plink2 && cd plink2 && curl -O s3.amazonaws.com/plink2-assets/plink2_l
     curl -O http://s3.amazonaws.com/plink2-assets/plink2_linux_avx2_latest.zip && \
     unzip plink2_linux_avx2_latest.zip && mv plink2 /usr/local/bin && cd .. && rm -rf plink2
 
+#KING
+RUN wget https://www.kingrelatedness.com/Linux-king.tar.gz && tar -xzvf Linux-king.tar.gz -C /usr/local/bin && rm Linux*king*.tar.gz
+
 ADD scripts ../scripts
 
