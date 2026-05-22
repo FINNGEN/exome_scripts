@@ -9,34 +9,25 @@ workflow exome_duplicates {
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
-  File plink_fam = sub(plink_bed, "\\.bed$", ".fam")
-
-  Array[File] plink_input_files =  [plink_bed, plink_bim, plink_fam, plink_afreq]
-
-  if (!defined(snp_list)) {
-    call ExtractSnpsFromBim {
-      input:
-        bim = plink_bim
-    }
-  }
-
-  File actual_snp_list = select_first([snp_list, ExtractSnpsFromBim.snp_list])
-  
-  call ConvertToPlink as PlinkFilter {
-    input:
-      prefix      = plink_prefix,
-      input_files = plink_input_files,
-      snp_list    = actual_snp_list
-  }
+  Array[File] plink_input_files = [plink_bed, plink_bim, sub(plink_bed, "\\.bed$", ".fam"),sub(plink_bed, "\\.bed$", ".afreq") ]
 
   scatter (pair in vcf_pairs) {
+    #subset exome VCF to the same SNPs as in the plink reference, then convert to plink format
     call ConvertToPlink as VcfToPlink {
       input:
         prefix      = pair[0],
-        input_files = [pair[1], pair[2]],
-        snp_list    = actual_snp_list
+        input_files = [pair[1]],
+        snp_list    = select_first([snp_list, plink_bim])
+    }
+    # subset plink reference to the shared SNPs with exome data
+    call ConvertToPlink as PlinkFilter {
+      input:
+        prefix      = plink_prefix,
+        input_files = plink_input_files,
+        snp_list    = VcfToPlink.plink_data[1]
     }
 
+    # run KING to find duplicates between the exome dataset and the plink reference
     call RunKinship {
       input:
         vcf_plink = VcfToPlink.plink_data,
@@ -45,35 +36,16 @@ workflow exome_duplicates {
     }
   }
 
-  
   output {
-    Array[Array[File]] exome_plink   = VcfToPlink.plink_data
-    Array[File]        kinship_con   = RunKinship.con_file
+    Array[Array[File]] exome_plink = VcfToPlink.plink_data
+    Array[File]        kinship_con = RunKinship.con_file
   }
 }
 
 task ExtractSnpsFromBim {
-  input {
-    File bim
-  }
-
-  Int disk_size = ceil(size(bim, 'GB')) + 5
-
-  command <<<
-  set -euo
-  cut -f2 ~{bim} > snp_list.txt
-  echo "Extracted $(wc -l < snp_list.txt) SNPs from bim file"
-  >>>
-
-  output {
-    File snp_list = "snp_list.txt"
-  }
-
-  runtime {
-    memory: "8G"
-    disks: "local-disk ~{disk_size} HDD"
-    preemptible: 1
-  }
+  input {File bim}
+  command <<< cut -f2 ~{bim} > snp_list.txt  >>>
+  output {File snp_list = "snp_list.txt"}
 }
 
 task RunKinship {
@@ -81,7 +53,8 @@ task RunKinship {
     Array[File] vcf_plink
     Array[File] ref_plink
     String      prefix
-    Int         cpu = 4
+    Int         cpu       = 16
+    Int         memory_gb = 64
   }
 
   Int disk_size = ceil(size(vcf_plink[0], 'GB') + size(ref_plink[0], 'GB')) * 2 + 10
@@ -101,7 +74,7 @@ task RunKinship {
   echo ""
 
   echo "Running KING --duplicate..."
-  king -b "${VCF_BED}","${REF_BED}" --duplicate --prefix "$OUTPUT"
+  king -b "${VCF_BED}","${REF_BED}" --duplicate --prefix "$OUTPUT" --cpus $(nproc)
 
   if [[ ! -f "${OUTPUT}.con" ]]; then
     touch "${OUTPUT}.con"
@@ -122,11 +95,9 @@ task RunKinship {
   }
 
   runtime {
-    docker: docker
-    memory: "16 GB"
+    memory: "~{memory_gb} GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu
-    preemptible: 1
   }
 }
 
@@ -148,6 +119,11 @@ task ConvertToPlink {
   INPUT_FILES=(~{sep=" " input_files})
   INPUT="${INPUT_FILES[0]}"
 
+  if [[ "$SNP_LIST" == *.bim ]]; then
+    BIM_FILE="$SNP_LIST"
+    SNP_LIST="snp_list_from_bim.txt"
+    cut -f2 "$BIM_FILE" > "$SNP_LIST"
+  fi
   echo "SNP list: $SNP_LIST ($(wc -l < "$SNP_LIST") SNPs)"
   echo ""
 
@@ -193,6 +169,5 @@ task ConvertToPlink {
     memory: "16 GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: 16
-    preemptible: 1
   }
 }
