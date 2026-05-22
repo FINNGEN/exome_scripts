@@ -9,7 +9,7 @@ workflow exome_duplicates {
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
-  Array[File] plink_input_files = [plink_bed, plink_bim, sub(plink_bed, "\\.bed$", ".fam"),sub(plink_bed, "\\.bed$", ".afreq") ]
+  Array[File] plink_input_files = [plink_bed, plink_bim, sub(plink_bed, "\\.bed$", ".fam")]
 
   scatter (pair in vcf_pairs) {
     #subset exome VCF to the same SNPs as in the plink reference, then convert to plink format
@@ -129,7 +129,7 @@ task ConvertToPlink {
 
   if [[ "$INPUT" == *.bed ]]; then
     echo "=== Plink to Plink: $PREFIX ==="
-    INPUT_FLAGS="--bfile ${INPUT%.bed} --read-freq ${INPUT_FILES[3]}"
+    INPUT_FLAGS="--bfile ${INPUT%.bed} "
   else
     echo "=== VCF to Plink: $PREFIX ==="
     INPUT_FLAGS="--vcf $INPUT --double-id --max-alleles 2"
