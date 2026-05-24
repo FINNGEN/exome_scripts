@@ -5,26 +5,33 @@ workflow exome_duplicates {
     Array[Array[String]] vcf_pairs
     File   plink_bed
     String plink_prefix
-    File?  snp_list
+    File?  bim
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
   Array[File] plink_input_files = [plink_bed, plink_bim, sub(plink_bed, "\\.bed$", ".fam")]
 
   scatter (pair in vcf_pairs) {
-    #subset exome VCF to the same SNPs as in the plink reference, then convert to plink format
+    # pre-filter VCF to bim SNPs (parallel bcftools per chrom, streaming)
+    call SubsetVCF {
+      input:
+        prefix    = pair[0],
+        input_vcf = pair[1],
+        bim       = select_first([bim, plink_bim])
+    }
+    # convert pre-filtered VCF to plink
     call ConvertToPlink as VcfToPlink {
       input:
         prefix      = pair[0],
-        input_files = [pair[1]],
-        snp_list    = select_first([snp_list, plink_bim])
+        input_files = [SubsetVCF.filtered_vcf],
+        bim         = select_first([bim, plink_bim])
     }
     # subset plink reference to the shared SNPs with exome data
     call ConvertToPlink as PlinkFilter {
       input:
         prefix      = plink_prefix,
         input_files = plink_input_files,
-        snp_list    = VcfToPlink.plink_data[1],
+        bim         = VcfToPlink.plink_bim,
         memory_gb   = 32
     }
 
@@ -43,10 +50,82 @@ workflow exome_duplicates {
   }
 }
 
-task ExtractSnpsFromBim {
-  input {File bim}
-  command <<< cut -f2 ~{bim} > snp_list.txt  >>>
-  output {File snp_list = "snp_list.txt"}
+task SubsetVCF {
+  input {
+    String prefix
+    File   input_vcf
+    File   bim
+    Int    cpu       = 24
+    Int    memory_gb = cpu
+  }
+
+  File   input_vcf_tbi = input_vcf + ".tbi"
+  String output_vcf    = prefix + ".subset.vcf.gz"
+  Int    disk_size     = ceil(size(input_vcf, 'GB') * 3)
+
+  command <<<
+  set -euo pipefail
+  VCF="~{input_vcf}"
+  touch "~{input_vcf_tbi}"
+  BIM="~{bim}"
+  OUTPUT_VCF="~{output_vcf}"
+  CHUNKS=$(( $(nproc) - 1 ))
+  if [[ $CHUNKS -lt 1 ]]; then CHUNKS=1; fi
+
+  # chromosomes present in the bim, normalised to chr-prefix
+  mkdir -p ./tmp
+  mapfile -t chromosomes < <(awk '{print $1}' "$BIM" | sort -u | awk '{print (/^chr/ ? $0 : "chr"$0)}')
+
+  N_BEFORE=$(bcftools index -s "$VCF" | awk '{sum+=$3} END {print sum}')
+  echo "Variants before filter: $N_BEFORE"
+  echo "Processing ${#chromosomes[@]} chromosomes in parallel ($CHUNKS jobs)..."
+  echo ""
+
+  # build per-chromosome CHROM\tPOS files; -T uses the tabix index for O(1) position lookup
+  # rather than scanning the full VCF, so this is the main bottleneck reducer
+  for chrom in "${chromosomes[@]}"; do
+    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
+    awk -v c="$chrom" '$1 == c || "chr"$1 == c {print c"\t"$4}' "$BIM" > "./tmp/pos_${safe_chrom}.txt"
+  done
+
+  # generate and run one bcftools job per chromosome; ConvertToPlink does the final
+  # ID-based --extract to handle any allele ambiguities after this positional pre-filter
+  SCRIPT_DIR=$(mktemp -d)
+  for chrom in "${chromosomes[@]}"; do
+    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
+    cat > "${SCRIPT_DIR}/run_${safe_chrom}.sh" << SCRIPT
+#!/bin/bash
+bcftools view -r "${chrom}" -T "./tmp/pos_${safe_chrom}.txt" "${VCF}" -Oz -o "chunk_${safe_chrom}.vcf.gz"
+echo "Done: ${chrom}"
+SCRIPT
+  done
+
+  ls "${SCRIPT_DIR}"/run_*.sh | parallel -j "$CHUNKS" 'bash {}'
+
+  # concat in original chromosome order (chunks are already sorted, -n skips re-sorting)
+  for chrom in "${chromosomes[@]}"; do
+    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
+    echo "chunk_${safe_chrom}.vcf.gz"
+  done > chunk_list.txt
+
+  bcftools concat -n -Oz -o "$OUTPUT_VCF" -f chunk_list.txt
+  rm -f chunk_*.vcf.gz chunk_list.txt
+
+  bcftools index -t "$OUTPUT_VCF"
+  N_AFTER=$(bcftools index -s "$OUTPUT_VCF" | awk '{sum+=$3} END {print sum}')
+  echo "Variants after filter: $N_AFTER"
+  >>>
+
+  output {
+    File filtered_vcf     = output_vcf
+    File filtered_vcf_tbi = output_vcf + ".tbi"
+  }
+
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks: "local-disk ~{disk_size} HDD"
+    cpu: cpu
+  }
 }
 
 task RunKinship {
@@ -107,26 +186,22 @@ task ConvertToPlink {
   input {
     String      prefix
     Array[File] input_files
-    File        snp_list
+    File        bim
     Int         memory_gb = 16
   }
 
-  Boolean is_plink  = basename(input_files[0], ".bed") != basename(input_files[0])
-  Int     disk_size = ceil(size(input_files[0], 'GB') * 3) + 20
+  Int disk_size = ceil(size(input_files[0], 'GB') * 3) + 20
 
   command <<<
   set -euo
   THREADS=$(nproc)
   PREFIX="~{prefix}"
-  SNP_LIST="~{snp_list}"
+  BIM="~{bim}"
   INPUT_FILES=(~{sep=" " input_files})
   INPUT="${INPUT_FILES[0]}"
 
-  if [[ "$SNP_LIST" == *.bim ]]; then
-    BIM_FILE="$SNP_LIST"
-    SNP_LIST="snp_list_from_bim.txt"
-    cut -f2 "$BIM_FILE" > "$SNP_LIST"
-  fi
+  cut -f2 "$BIM" > snp_list.txt
+  SNP_LIST="snp_list.txt"
   echo "SNP list: $SNP_LIST ($(wc -l < "$SNP_LIST") SNPs)"
   echo ""
 
@@ -137,7 +212,7 @@ task ConvertToPlink {
       shuf -n 20000 "$SNP_LIST" > snp_list_capped.txt
       SNP_LIST="snp_list_capped.txt"
     fi
-    INPUT_FLAGS="--bfile ${INPUT%.bed} "
+    INPUT_FLAGS="--bfile ${INPUT%.bed}"
   else
     echo "=== VCF to Plink: $PREFIX ==="
     INPUT_FLAGS="--vcf $INPUT --double-id --max-alleles 2"
@@ -171,7 +246,8 @@ task ConvertToPlink {
   >>>
 
   output {
-    Array[File] plink_data = ["~{prefix}.bed", "~{prefix}.bim","~{prefix}.fam"]
+    Array[File] plink_data = ["~{prefix}.bed", "~{prefix}.bim", "~{prefix}.fam"]
+    File        plink_bim  = "~{prefix}.bim"
   }
 
   runtime {

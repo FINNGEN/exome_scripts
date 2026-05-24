@@ -10,9 +10,10 @@ Sample matching identifies which samples in the exome datasets correspond to sam
 
 For each exome dataset:
 
-1. **VcfToPlink**: Converts the exome VCF to plink format, extracting only the SNPs present in the plink reference `.bim` file (or an optional custom SNP list). Sample IIDs are renamed to `PREFIX_OLDIID` to avoid collisions when merging datasets.
-2. **PlinkFilter**: Subsets the plink reference to the SNPs shared with the exome dataset. To keep KING fast, the SNP list is capped at 20,000 randomly sampled variants. Runs with 32 GB memory.
-3. **RunKinship**: Runs `king --duplicate` between the exome plink dataset and the filtered reference to identify duplicate sample pairs across the two datasets.
+1. **SubsetVCF**: Pre-filters the exome VCF to only the positions present in the reference `.bim` file. Runs one `bcftools view -T` job per chromosome in parallel, using the tabix index for fast positional lookup rather than scanning the full VCF. Chunks are concatenated into a single filtered VCF. This is the main memory and runtime bottleneck reducer — plink2 never sees the full VCF.
+2. **VcfToPlink**: Converts the pre-filtered VCF to plink format. Uses `--extract` with bim IDs as a final filter to resolve any allele ambiguities. Sample IIDs are renamed to `PREFIX_OLDIID` to avoid collisions when merging datasets.
+3. **PlinkFilter**: Subsets the plink reference to the SNPs shared with the exome dataset. To keep KING fast, the SNP list is capped at 20,000 randomly sampled variants. Runs with 32 GB memory.
+4. **RunKinship**: Runs `king --duplicate` between the exome plink dataset and the filtered reference to identify duplicate sample pairs across the two datasets.
 
 **Inputs:**
 
@@ -25,11 +26,11 @@ For each exome dataset:
   ],
   "exome_duplicates.plink_bed":    "gs://bucket/finngen_ref.bed",
   "exome_duplicates.plink_prefix": "finngen_ref",
-  "exome_duplicates.snp_list":     "gs://bucket/custom_snps.txt"
+  "exome_duplicates.bim":          "gs://bucket/custom.bim"
 }
 ```
 
-`vcf_pairs` is an array of `[prefix, vcf_path]` pairs. `snp_list` is optional; if omitted the reference `.bim` file is used.
+`vcf_pairs` is an array of `[prefix, vcf_path]` pairs. `bim` is optional; if omitted the reference `.bim` file derived from `plink_bed` is used.
 
 **Outputs:**
 
