@@ -1,7 +1,44 @@
-g# EXOME data processing
+# EXOME data processing
 
 ## SAMPLE MATCHING
-TBD
+
+Sample matching identifies which samples in the exome datasets correspond to samples in the FinnGen plink reference. This is done using `exome_duplicates.wdl`, which runs KING duplicate detection between each exome VCF and the reference panel.
+
+### exome_duplicates.wdl
+
+**What it does:**
+
+For each exome dataset:
+
+1. **VcfToPlink**: Converts the exome VCF to plink format, extracting only the SNPs present in the plink reference `.bim` file (or an optional custom SNP list). Sample IIDs are renamed to `PREFIX_OLDIID` to avoid collisions when merging datasets.
+2. **PlinkFilter**: Subsets the plink reference to the SNPs shared with the exome dataset. To keep KING fast, the SNP list is capped at 20,000 randomly sampled variants. Runs with 32 GB memory.
+3. **RunKinship**: Runs `king --duplicate` between the exome plink dataset and the filtered reference to identify duplicate sample pairs across the two datasets.
+
+**Inputs:**
+
+```json
+{
+  "exome_duplicates.vcf_pairs": [
+    ["BOTNIA", "gs://bucket/botnia.vcf.gz"],
+    ["ADPKD", "gs://bucket/adpkd.vcf.gz"],
+    ["DALY",  "gs://bucket/daly.vcf.gz"]
+  ],
+  "exome_duplicates.plink_bed":    "gs://bucket/finngen_ref.bed",
+  "exome_duplicates.plink_prefix": "finngen_ref",
+  "exome_duplicates.snp_list":     "gs://bucket/custom_snps.txt"
+}
+```
+
+`vcf_pairs` is an array of `[prefix, vcf_path]` pairs. `snp_list` is optional; if omitted the reference `.bim` file is used.
+
+**Outputs:**
+
+- `exome_plink[][]`: Plink files (bed/bim/fam) for each exome dataset
+- `kinship_con[]`: KING `.con` files listing duplicate pairs per dataset
+
+**Reading the output:**
+
+Each `.con` file contains one duplicate pair per line. A non-empty file means samples from that exome cohort were found in the FinnGen reference. The pair count is printed to stdout at the end of the KING task.
 
 
 ## Annotation/QC

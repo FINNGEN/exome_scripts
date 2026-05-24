@@ -24,7 +24,8 @@ workflow exome_duplicates {
       input:
         prefix      = plink_prefix,
         input_files = plink_input_files,
-        snp_list    = VcfToPlink.plink_data[1]
+        snp_list    = VcfToPlink.plink_data[1],
+        memory_gb   = 32
     }
 
     # run KING to find duplicates between the exome dataset and the plink reference
@@ -95,6 +96,7 @@ task RunKinship {
   }
 
   runtime {
+    docker: docker
     memory: "~{memory_gb} GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: cpu
@@ -106,6 +108,7 @@ task ConvertToPlink {
     String      prefix
     Array[File] input_files
     File        snp_list
+    Int         memory_gb = 16
   }
 
   Boolean is_plink  = basename(input_files[0], ".bed") != basename(input_files[0])
@@ -129,6 +132,11 @@ task ConvertToPlink {
 
   if [[ "$INPUT" == *.bed ]]; then
     echo "=== Plink to Plink: $PREFIX ==="
+    if [[ $(wc -l < "$SNP_LIST") -gt 20000 ]]; then
+      echo "Capping SNP list to 20k random variants (was $(wc -l < "$SNP_LIST"))..."
+      shuf -n 20000 "$SNP_LIST" > snp_list_capped.txt
+      SNP_LIST="snp_list_capped.txt"
+    fi
     INPUT_FLAGS="--bfile ${INPUT%.bed} "
   else
     echo "=== VCF to Plink: $PREFIX ==="
@@ -143,6 +151,7 @@ task ConvertToPlink {
     --make-bed \
     --out "$PREFIX" \
     --threads $THREADS \
+    --memory ~{memory_gb * 1024} \
     --allow-extra-chr
 
   echo ""
@@ -166,7 +175,7 @@ task ConvertToPlink {
   }
 
   runtime {
-    memory: "16 GB"
+    memory: "~{memory_gb} GB"
     disks: "local-disk ~{disk_size} HDD"
     cpu: 16
   }
