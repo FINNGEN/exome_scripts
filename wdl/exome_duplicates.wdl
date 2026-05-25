@@ -21,16 +21,23 @@ workflow exome_duplicates {
         bim       = select_first([bim, plink_bim])
     }
 
-    # convert plink reference in parallel chunks and find cross-dataset duplicates
+    # subset plink to snplist and rename sample IDs with plink_prefix
+    call PlinkSubset {
+      input:
+        dataset_prefix = pair[0],
+        plink_prefix   = plink_prefix,
+        plink_files    = plink_input_files,
+        snplist        = SubsetVCF.snplist
+    }
+
+    # find cross-dataset duplicates by genotype concordance
     call RunGtcheck {
       input:
-        query_vcf    = SubsetVCF.filtered_vcf,
-        query_tbi    = SubsetVCF.filtered_vcf_tbi,
-        plink_prefix = plink_prefix,
-        plink_files  = plink_input_files,
-        snplist      = SubsetVCF.snplist,
-        prefix       = pair[0] + "_gtcheck",
-        chunk_size   = chunk_size
+        query_vcf   = SubsetVCF.filtered_vcf,
+        query_tbi   = SubsetVCF.filtered_vcf_tbi,
+        plink_files = PlinkSubset.plink_out,
+        prefix      = pair[0] + "_gtcheck",
+        chunk_size  = chunk_size
     }
   }
 
@@ -71,8 +78,6 @@ task SubsetVCF {
   echo "Processing ${#chromosomes[@]} chromosomes in parallel ($CHUNKS jobs)..."
   echo ""
 
-  # build per-chromosome CHROM\tPOS files; -T uses the tabix index for O(1) position lookup
-  # rather than scanning the full VCF, so this is the main bottleneck reducer
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
     awk -v c="$chrom" '$1 == c || "chr"$1 == c {print c"\t"$4}' "$BIM" > "./tmp/pos_${safe_chrom}.txt"
@@ -90,7 +95,6 @@ SCRIPT
 
   ls "${SCRIPT_DIR}"/run_*.sh | parallel -j "$CHUNKS" 'bash {}'
 
-  # concat in original chromosome order (chunks are already sorted, -n skips re-sorting)
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
     echo "chunk_${safe_chrom}.vcf.gz"
@@ -119,13 +123,60 @@ SCRIPT
   }
 }
 
+task PlinkSubset {
+  input {
+    String      dataset_prefix
+    String      plink_prefix
+    Array[File] plink_files
+    File        snplist
+    Int         cpu       = 4
+    Int         memory_gb = 16
+  }
+
+  File   plink_bed  = plink_files[0]
+  Int    disk_size  = ceil(size(plink_bed, 'GB') * 2) + 10
+  String out_prefix = dataset_prefix + "_" + plink_prefix
+
+  command <<<
+  set -euo pipefail
+  PLINK_PREFIX="~{sub(plink_bed, '\\.bed$', '')}"
+
+  echo "Ref:      $PLINK_PREFIX"
+  echo "Variants: $(wc -l < '~{snplist}') SNPs"
+  echo ""
+
+  plink2 \
+    --bfile "$PLINK_PREFIX" \
+    --extract "~{snplist}" \
+    --make-bed \
+    --out "~{out_prefix}" \
+    --threads ~{cpu}
+
+  # rename IIDs in-place: plink_prefix_SAMPLE
+  awk -v p="~{plink_prefix}" 'BEGIN{OFS="\t"} {$2 = p"_"$2; print}' "~{out_prefix}.fam" > tmp.fam
+  mv tmp.fam "~{out_prefix}.fam"
+
+  echo "Done."
+  echo "  Samples:  $(wc -l < '~{out_prefix}.fam')"
+  echo "  Variants: $(wc -l < '~{out_prefix}.bim')"
+  >>>
+
+  output {
+    Array[File] plink_out = ["~{out_prefix}.bed", "~{out_prefix}.bim", "~{out_prefix}.fam"]
+  }
+
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks:  "local-disk ~{disk_size} HDD"
+    cpu:    cpu
+  }
+}
+
 task RunGtcheck {
   input {
     File        query_vcf
     File        query_tbi
-    String      plink_prefix
     Array[File] plink_files
-    File        snplist
     String      prefix
     Int         chunk_size = 100
     Int         cpu        = 32
@@ -138,34 +189,40 @@ task RunGtcheck {
   command <<<
   set -euo pipefail
   touch "~{query_tbi}"
-  PLINK_PREFIX="~{sub(plink_bed, '\\.bed$', '')}"
+
+  # symlink plink files to a consistent local prefix
+  ln -s "~{plink_files[0]}" plink_in.bed
+  ln -s "~{plink_files[1]}" plink_in.bim
+  ln -s "~{plink_files[2]}" plink_in.fam
+
   QUERY_VCF="~{query_vcf}"
   PREFIX="~{prefix}"
-  SNPLIST="~{snplist}"
 
   echo "Query: $QUERY_VCF ($(bcftools query -l "$QUERY_VCF" | wc -l) samples)"
-  echo "Ref:   $PLINK_PREFIX"
+  echo "Ref:   $(wc -l < plink_in.fam) samples, $(wc -l < plink_in.bim) variants"
   echo "Chunks: ~{chunk_size} samples each"
   echo ""
 
-  # rename fam so exported sample IDs are prefixed with the dataset name
-  RENAMED_FAM="${PREFIX}_~{plink_prefix}.fam"
-  awk -v p="~{plink_prefix}" 'BEGIN{OFS="\t"} {$2 = p"_"$2; print}' "${PLINK_PREFIX}.fam" > "$RENAMED_FAM"
-  echo "Renamed fam: $RENAMED_FAM ($(wc -l < "$RENAMED_FAM") samples)"
-
-  # split fam into sample chunks
-  awk '{print $1, $2}' "$RENAMED_FAM" | split -d -l ~{chunk_size} - "${PREFIX}_chunk_"
+  # fam already has renamed IIDs from PlinkSubset — split directly
+  awk '{print $1, $2}' plink_in.fam | split -d -l ~{chunk_size} - "${PREFIX}_chunk_"
   mapfile -t CHUNKS < <(ls "${PREFIX}_chunk_"*)
 
   NJOBS=$(( ${#CHUNKS[@]} < $(nproc) ? ${#CHUNKS[@]} : $(nproc) ))
   MEM_PER_JOB=$(( ~{memory_gb} * 1024 / NJOBS ))
 
-  # split.sh: plink2 conversion + tabix per chunk
+  # split.sh: plink2 conversion per chunk
   SPLIT_SH="${PREFIX}_split.sh"
   for chunk in "${CHUNKS[@]}"; do
-    echo "plink2 --bfile ${PLINK_PREFIX} --fam ${RENAMED_FAM} --extract ${SNPLIST} --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB} && bcftools index -t ${chunk}_ref.vcf.gz"
+    echo "plink2 --bfile plink_in --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB}"
   done > "$SPLIT_SH"
   parallel -j "$(nproc)" < "$SPLIT_SH"
+
+  # index chunk_00 and copy tbi to all other chunks
+  bcftools index -t "${PREFIX}_chunk_00_ref.vcf.gz"
+  for chunk in "${CHUNKS[@]}"; do
+    [[ "$chunk" == "${PREFIX}_chunk_00" ]] && continue
+    cp "${PREFIX}_chunk_00_ref.vcf.gz.tbi" "${chunk}_ref.vcf.gz.tbi"
+  done
 
   # gtcheck.sh: one gtcheck per chunk
   GTCHECK_SH="${PREFIX}_gtcheck.sh"

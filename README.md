@@ -2,7 +2,7 @@
 
 ## SAMPLE MATCHING
 
-Sample matching identifies which samples in the exome datasets correspond to samples in the FinnGen plink reference. This is done using `exome_duplicates.wdl`, which runs KING duplicate detection between each exome VCF and the reference panel.
+Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel. This is done using `exome_duplicates.wdl`, which measures genotype concordance between each exome VCF and the reference using `bcftools gtcheck`.
 
 ### exome_duplicates.wdl
 
@@ -10,10 +10,11 @@ Sample matching identifies which samples in the exome datasets correspond to sam
 
 For each exome dataset:
 
-1. **SubsetVCF**: Pre-filters the exome VCF to only the positions present in the reference `.bim` file. Runs one `bcftools view -T` job per chromosome in parallel, using the tabix index for fast positional lookup rather than scanning the full VCF. Chunks are concatenated into a single filtered VCF. This is the main memory and runtime bottleneck reducer — plink2 never sees the full VCF.
-2. **VcfToPlink**: Converts the pre-filtered VCF to plink format. Uses `--extract` with bim IDs as a final filter to resolve any allele ambiguities. Sample IIDs are renamed to `PREFIX_OLDIID` to avoid collisions when merging datasets.
-3. **PlinkFilter**: Subsets the plink reference to the SNPs shared with the exome dataset. To keep KING fast, the SNP list is capped at 20,000 randomly sampled variants. Runs with 32 GB memory.
-4. **RunKinship**: Runs `king --duplicate` between the exome plink dataset and the filtered reference to identify duplicate sample pairs across the two datasets.
+1. **SubsetVCF**: Pre-filters the exome VCF to only the positions present in the reference `.bim` file. Runs one `bcftools view -T` job per chromosome in parallel using the tabix index for fast positional lookup. Chunks are concatenated into a single filtered VCF and a SNP ID list is written for the next step.
+
+2. **PlinkSubset**: Subsets the plink reference to the SNPs from SubsetVCF (`--extract`) and renames all sample IIDs in-place to `plink_prefix_SAMPLE` (e.g. `finngen_R14_hm3_FINNGEN_R14_XX00000001`) so reference samples are unambiguously labelled in the gtcheck output.
+
+3. **RunGtcheck**: Splits the renamed plink fam into chunks of `chunk_size` samples, converts each chunk to a bgzipped VCF with plink2 in parallel (32 CPUs, memory divided equally across jobs), indexes chunk_00 and copies the `.tbi` to all other chunks, then runs `bcftools gtcheck --no-HWE-prob` for each chunk in parallel. Results are merged and summarised: for each query sample the best match, second-best match, average concordance across all others, and the ratio best/average are reported.
 
 **Inputs:**
 
@@ -21,25 +22,33 @@ For each exome dataset:
 {
   "exome_duplicates.vcf_pairs": [
     ["BOTNIA", "gs://bucket/botnia.vcf.gz"],
-    ["ADPKD", "gs://bucket/adpkd.vcf.gz"],
-    ["DALY",  "gs://bucket/daly.vcf.gz"]
+    ["ADPKD",  "gs://bucket/adpkd.vcf.gz"]
   ],
-  "exome_duplicates.plink_bed":    "gs://bucket/finngen_ref.bed",
-  "exome_duplicates.plink_prefix": "finngen_ref",
-  "exome_duplicates.bim":          "gs://bucket/custom.bim"
+  "exome_duplicates.plink_bed":    "gs://bucket/finngen_R14_hm3.bed",
+  "exome_duplicates.plink_prefix": "FG",
+  "exome_duplicates.bim":          "gs://bucket/custom.bim",
+  "exome_duplicates.chunk_size":   100
 }
 ```
 
-`vcf_pairs` is an array of `[prefix, vcf_path]` pairs. `bim` is optional; if omitted the reference `.bim` file derived from `plink_bed` is used.
+`vcf_pairs` is an array of `[prefix, vcf_path]` pairs. `bim` is optional — if omitted the `.bim` derived from `plink_bed` is used. `chunk_size` controls how many reference samples are processed per parallel plink2/gtcheck job (default 100).
 
 **Outputs:**
 
-- `exome_plink[][]`: Plink files (bed/bim/fam) for each exome dataset
-- `kinship_con[]`: KING `.con` files listing duplicate pairs per dataset
+- `gtcheck_raw[]`: Raw `bcftools gtcheck` output per dataset
+- `gtcheck_summary[]`: TSV summary per dataset with columns `QUERY`, `BEST_MATCH`, `BEST_RATE`, `2ND_MATCH`, `2ND_RATE`, `AVG_OTHERS`, `RATIO`
 
 **Reading the output:**
 
-Each `.con` file contains one duplicate pair per line. A non-empty file means samples from that exome cohort were found in the FinnGen reference. The pair count is printed to stdout at the end of the KING task.
+Each row in the summary TSV is one query (exome) sample. `BEST_MATCH` is the most concordant reference sample. `RATIO` = `BEST_RATE / AVG_OTHERS` — a low ratio (< 0.1) indicates a likely true duplicate. `BEST_RATE` is the per-site discordance rate so lower = more similar.
+
+**Local testing:**
+
+`scripts/test_gtcheck.sh` replicates the RunGtcheck step locally:
+
+```bash
+scripts/test_gtcheck.sh <query.vcf.gz> <plink_prefix> [output_prefix] [--parallel N]
+```
 
 
 ## Annotation/QC
