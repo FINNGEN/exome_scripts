@@ -6,6 +6,7 @@ workflow exome_duplicates {
     File   plink_bed
     String plink_prefix
     File?  bim
+    Int    chunk_size = 100
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
@@ -19,34 +20,23 @@ workflow exome_duplicates {
         input_vcf = pair[1],
         bim       = select_first([bim, plink_bim])
     }
-    # convert pre-filtered VCF to plink
-    call ConvertToPlink as VcfToPlink {
-      input:
-        prefix      = pair[0],
-        input_files = [SubsetVCF.filtered_vcf],
-        bim         = select_first([bim, plink_bim])
-    }
-    # subset plink reference to the shared SNPs with exome data
-    call ConvertToPlink as PlinkFilter {
-      input:
-        prefix      = plink_prefix,
-        input_files = plink_input_files,
-        bim         = VcfToPlink.plink_bim,
-        memory_gb   = 32
-    }
 
-    # run KING to find duplicates between the exome dataset and the plink reference
-    call RunKinship {
+    # convert plink reference in parallel chunks and find cross-dataset duplicates
+    call RunGtcheck {
       input:
-        vcf_plink = VcfToPlink.plink_data,
-        ref_plink = PlinkFilter.plink_data,
-        prefix    = pair[0] + "_king"
+        query_vcf    = SubsetVCF.filtered_vcf,
+        query_tbi    = SubsetVCF.filtered_vcf_tbi,
+        plink_prefix = plink_prefix,
+        plink_files  = plink_input_files,
+        snplist      = SubsetVCF.snplist,
+        prefix       = pair[0] + "_gtcheck",
+        chunk_size   = chunk_size
     }
   }
 
   output {
-    Array[Array[File]] exome_plink = VcfToPlink.plink_data
-    Array[File]        kinship_con = RunKinship.con_file
+    Array[File] gtcheck_raw     = RunGtcheck.gtcheck_raw
+    Array[File] gtcheck_summary = RunGtcheck.gtcheck_summary
   }
 }
 
@@ -88,8 +78,6 @@ task SubsetVCF {
     awk -v c="$chrom" '$1 == c || "chr"$1 == c {print c"\t"$4}' "$BIM" > "./tmp/pos_${safe_chrom}.txt"
   done
 
-  # generate and run one bcftools job per chromosome; ConvertToPlink does the final
-  # ID-based --extract to handle any allele ambiguities after this positional pre-filter
   SCRIPT_DIR=$(mktemp -d)
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
@@ -114,11 +102,14 @@ SCRIPT
   bcftools index -t "$OUTPUT_VCF"
   N_AFTER=$(bcftools index -s "$OUTPUT_VCF" | awk '{sum+=$3} END {print sum}')
   echo "Variants after filter: $N_AFTER"
+
+  bcftools query -f '%ID\n' "$OUTPUT_VCF" > "~{prefix}.snplist.txt"
   >>>
 
   output {
     File filtered_vcf     = output_vcf
     File filtered_vcf_tbi = output_vcf + ".tbi"
+    File snplist          = prefix + ".snplist.txt"
   }
 
   runtime {
@@ -128,131 +119,115 @@ SCRIPT
   }
 }
 
-task RunKinship {
+task RunGtcheck {
   input {
-    Array[File] vcf_plink
-    Array[File] ref_plink
+    File        query_vcf
+    File        query_tbi
+    String      plink_prefix
+    Array[File] plink_files
+    File        snplist
     String      prefix
-    Int         cpu       = 16
-    Int         memory_gb = 64
+    Int         chunk_size = 100
+    Int         cpu        = 32
+    Int         memory_gb  = 32
   }
 
-  Int disk_size = ceil(size(vcf_plink[0], 'GB') + size(ref_plink[0], 'GB')) * 2 + 10
-  String docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:king"
+  File plink_bed = plink_files[0]
+  Int  disk_size = ceil(size(query_vcf, 'GB') + size(plink_bed, 'GB')) * 3 + 20
 
   command <<<
   set -euo pipefail
-
-  VCF_BED="~{vcf_plink[0]}"
-  REF_BED="~{ref_plink[0]}"
-  VCF_PREFIX="${VCF_BED%.bed}"
-  REF_PREFIX="${REF_BED%.bed}"
-  OUTPUT="~{prefix}"
-
-  echo "VCF dataset: $VCF_PREFIX ($(wc -l < "${VCF_PREFIX}.fam") samples, $(wc -l < "${VCF_PREFIX}.bim") SNPs)"
-  echo "Ref dataset: $REF_PREFIX ($(wc -l < "${REF_PREFIX}.fam") samples, $(wc -l < "${REF_PREFIX}.bim") SNPs)"
-  echo ""
-
-  echo "Running KING --duplicate..."
-  king -b "${VCF_BED}","${REF_BED}" --duplicate --prefix "$OUTPUT" --cpus $(nproc)
-
-  if [[ ! -f "${OUTPUT}.con" ]]; then
-    touch "${OUTPUT}.con"
-  fi
-
-  echo ""
-  echo "Done."
-  N_DUPS=$(tail -n +2 "${OUTPUT}.con" | wc -l)
-  echo "  Duplicate pairs: ${N_DUPS}"
-  if [[ $N_DUPS -gt 0 ]]; then
-    echo ""
-    head -5 "${OUTPUT}.con"
-  fi
-  >>>
-
-  output {
-    File con_file = "~{prefix}.con"
-  }
-
-  runtime {
-    docker: docker
-    memory: "~{memory_gb} GB"
-    disks: "local-disk ~{disk_size} HDD"
-    cpu: cpu
-  }
-}
-
-task ConvertToPlink {
-  input {
-    String      prefix
-    Array[File] input_files
-    File        bim
-    Int         memory_gb = 16
-  }
-
-  Int disk_size = ceil(size(input_files[0], 'GB') * 3) + 20
-
-  command <<<
-  set -euo
-  THREADS=$(nproc)
+  touch "~{query_tbi}"
+  PLINK_PREFIX="~{sub(plink_bed, '\\.bed$', '')}"
+  QUERY_VCF="~{query_vcf}"
   PREFIX="~{prefix}"
-  BIM="~{bim}"
-  INPUT_FILES=(~{sep=" " input_files})
-  INPUT="${INPUT_FILES[0]}"
+  SNPLIST="~{snplist}"
 
-  cut -f2 "$BIM" > snp_list.txt
-  SNP_LIST="snp_list.txt"
-  echo "SNP list: $SNP_LIST ($(wc -l < "$SNP_LIST") SNPs)"
+  echo "Query: $QUERY_VCF ($(bcftools query -l "$QUERY_VCF" | wc -l) samples)"
+  echo "Ref:   $PLINK_PREFIX"
+  echo "Chunks: ~{chunk_size} samples each"
   echo ""
 
-  if [[ "$INPUT" == *.bed ]]; then
-    echo "=== Plink to Plink: $PREFIX ==="
-    if [[ $(wc -l < "$SNP_LIST") -gt 20000 ]]; then
-      echo "Capping SNP list to 20k random variants (was $(wc -l < "$SNP_LIST"))..."
-      shuf -n 20000 "$SNP_LIST" > snp_list_capped.txt
-      SNP_LIST="snp_list_capped.txt"
-    fi
-    INPUT_FLAGS="--bfile ${INPUT%.bed}"
-  else
-    echo "=== VCF to Plink: $PREFIX ==="
-    INPUT_FLAGS="--vcf $INPUT --double-id --max-alleles 2"
-  fi
+  # rename fam so exported sample IDs are prefixed with the dataset name
+  RENAMED_FAM="${PREFIX}_~{plink_prefix}.fam"
+  awk -v p="~{plink_prefix}" 'BEGIN{OFS="\t"} {$2 = p"_"$2; print}' "${PLINK_PREFIX}.fam" > "$RENAMED_FAM"
+  echo "Renamed fam: $RENAMED_FAM ($(wc -l < "$RENAMED_FAM") samples)"
 
-  plink2 \
-    $INPUT_FLAGS \
-    --extract "$SNP_LIST" \
-    --autosome \
-    --maj-ref force \
-    --make-bed \
-    --out "$PREFIX" \
-    --threads $THREADS \
-    --memory ~{memory_gb * 1024} \
-    --allow-extra-chr
+  # split fam into sample chunks
+  awk '{print $1, $2}' "$RENAMED_FAM" | split -d -l ~{chunk_size} - "${PREFIX}_chunk_"
+  mapfile -t CHUNKS < <(ls "${PREFIX}_chunk_"*)
 
-  echo ""
-  echo "Renaming IIDs to ${PREFIX}_OLDIID..."
-  awk -v prefix="$PREFIX" 'BEGIN{OFS="\t"} {print $1, $2, $1, prefix "_" $2}' "${PREFIX}.fam" > id_mapping.txt
-  plink2 \
-    --bfile "$PREFIX" \
-    --update-ids id_mapping.txt \
-    --make-just-fam \
-    --out "$PREFIX"
-  rm -f id_mapping.txt
+  NJOBS=$(( ${#CHUNKS[@]} < $(nproc) ? ${#CHUNKS[@]} : $(nproc) ))
+  MEM_PER_JOB=$(( ~{memory_gb} * 1024 / NJOBS ))
+
+  # split.sh: plink2 conversion + tabix per chunk
+  SPLIT_SH="${PREFIX}_split.sh"
+  for chunk in "${CHUNKS[@]}"; do
+    echo "plink2 --bfile ${PLINK_PREFIX} --fam ${RENAMED_FAM} --extract ${SNPLIST} --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB} && bcftools index -t ${chunk}_ref.vcf.gz"
+  done > "$SPLIT_SH"
+  parallel -j "$(nproc)" < "$SPLIT_SH"
+
+  # gtcheck.sh: one gtcheck per chunk
+  GTCHECK_SH="${PREFIX}_gtcheck.sh"
+  for chunk in "${CHUNKS[@]}"; do
+    echo "bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.vcf.gz ${QUERY_VCF} > ${chunk}.gtcheck && rm ${chunk}_ref.vcf.gz ${chunk}_ref.vcf.gz.tbi"
+  done > "$GTCHECK_SH"
+  parallel -j "$(nproc)" < "$GTCHECK_SH"
+
+  cat "${PREFIX}_chunk_"*.gtcheck > "${PREFIX}.gtcheck"
+  rm -f "${PREFIX}_chunk_"* "$SPLIT_SH" "$GTCHECK_SH"
+
+  python3 - "${PREFIX}.gtcheck" << 'PYEOF' > "${PREFIX}.summary.tsv"
+import sys
+
+stats = {}
+with open(sys.argv[1]) as f:
+    for line in f:
+        if not line.startswith('DCv2'):
+            continue
+        parts = line.rstrip('\n').split('\t')
+        query, ref = parts[1], parts[2]
+        nsites = int(parts[5])
+        rate = float(parts[3]) / nsites if nsites > 0 else 1.0
+        if query not in stats:
+            stats[query] = {'best': (rate, ref), 'second': None, 'sum': rate, 'count': 1}
+        else:
+            s = stats[query]
+            s['sum'] += rate
+            s['count'] += 1
+            if rate < s['best'][0]:
+                s['second'] = s['best']
+                s['best'] = (rate, ref)
+            elif s['second'] is None or rate < s['second'][0]:
+                s['second'] = (rate, ref)
+
+print('\t'.join(['QUERY','BEST_MATCH','BEST_RATE','2ND_MATCH','2ND_RATE','AVG_OTHERS','RATIO']))
+rows = []
+for query, s in stats.items():
+    best_rate, best_ref = s['best']
+    second_rate, second_ref = s['second'] if s['second'] else (float('nan'), 'N/A')
+    avg_others = (s['sum'] - best_rate) / (s['count'] - 1) if s['count'] > 1 else float('nan')
+    ratio = best_rate / avg_others if avg_others > 0 else float('nan')
+    rows.append((best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio))
+rows.sort()
+for best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio in rows:
+    print(f'{query}\t{best_ref}\t{best_rate:.6f}\t{second_ref}\t{second_rate:.6f}\t{avg_others:.6f}\t{ratio:.6f}')
+PYEOF
 
   echo ""
   echo "Done."
-  echo "  SNPs:    $(wc -l < "${PREFIX}.bim")"
-  echo "  Samples: $(wc -l < "${PREFIX}.fam")"
+  echo "  Sites compared: $(awk '/^DCv2/ {print $6; exit}' "${PREFIX}.gtcheck")"
+  echo "  Likely duplicates (ratio < 0.1): $(awk -F'\t' 'NR>1 && $7 < 0.1' "${PREFIX}.summary.tsv" | wc -l)"
   >>>
 
   output {
-    Array[File] plink_data = ["~{prefix}.bed", "~{prefix}.bim", "~{prefix}.fam"]
-    File        plink_bim  = "~{prefix}.bim"
+    File gtcheck_raw     = prefix + ".gtcheck"
+    File gtcheck_summary = prefix + ".summary.tsv"
   }
 
   runtime {
     memory: "~{memory_gb} GB"
-    disks: "local-disk ~{disk_size} HDD"
-    cpu: 16
+    disks:  "local-disk ~{disk_size} HDD"
+    cpu:    cpu
   }
 }

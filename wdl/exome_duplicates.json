@@ -1,8 +1,10 @@
 {
     "exome_duplicates.plink_prefix": "FG",
-    "exome_duplicates.RunKinship.cpu": 32,
     "exome_duplicates.plink_bed": "gs://finngen-production-library-red/finngen_R14/plink_1.0/data/finngen_R14_hm3.bed",
-    "exome_duplicates.vcf_pairs": [["BOTNIA","gs://fg-3/exome_v2/data/THLBB2023_14_WES_Botnia.QC_ANNOTATED.vcf.gz"],["ADPKD","gs://fg-3/exome_v2/data/likely_pathogenic_annot_annotated_full_header_fix_resampled.QC_ANNOTATED.vcf.gz"],["DALY","gs://fg-3/exome_v2/data/fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly.QC_ANNOTATED.vcf.gz"]],
-    #"exome_duplicates.snp_list": "gs://finngen-production-library-red/finngen_R14/plink_1.0/data/finngen_R14_hm3.bed",
+    "exome_duplicates.chunk_size": 10000,
+    "exome_duplicates.RunGtcheck.cpu": 32,
+
+    #"exome_duplicates.vcf_pairs": [["BOTNIA","gs://fg-3/exome_v2/data/THLBB2023_14_WES_Botnia.QC_ANNOTATED.vcf.gz"],["ADPKD","gs://fg-3/exome_v2/data/likely_pathogenic_annot_annotated_full_header_fix_resampled.QC_ANNOTATED.vcf.gz"],["DALY","gs://fg-3/exome_v2/data/fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly.QC_ANNOTATED.vcf.gz"]],
+    "exome_duplicates.vcf_pairs": [["ADPKD","gs://fg-3/exome_v2/data/likely_pathogenic_annot_annotated_full_header_fix_resampled.QC_ANNOTATED.vcf.gz"]]
 }
 
