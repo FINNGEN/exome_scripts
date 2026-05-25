@@ -6,7 +6,7 @@ workflow exome_duplicates {
     File   plink_bed
     String plink_prefix
     File?  bim
-    Int    chunk_size = 100
+    Int    chunk_size = 10000
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
@@ -83,12 +83,15 @@ task SubsetVCF {
     awk -v c="$chrom" '$1 == c || "chr"$1 == c {print c"\t"$4}' "$BIM" > "./tmp/pos_${safe_chrom}.txt"
   done
 
+  # build sample rename map: OLD_NAME -> PREFIX_OLD_NAME
+  bcftools query -l "$VCF" | awk -v p="~{prefix}" '{print $0"\t"p"_"$0}' > sample_rename.txt
+
   SCRIPT_DIR=$(mktemp -d)
   for chrom in "${chromosomes[@]}"; do
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
     cat > "${SCRIPT_DIR}/run_${safe_chrom}.sh" << SCRIPT
 #!/bin/bash
-bcftools view -r "${chrom}" -T "./tmp/pos_${safe_chrom}.txt" "${VCF}" -Oz -o "chunk_${safe_chrom}.vcf.gz"
+bcftools view -r "${chrom}" -T "./tmp/pos_${safe_chrom}.txt" "${VCF}" | bcftools reheader -s ./sample_rename.txt -o "chunk_${safe_chrom}.vcf.gz"
 echo "Done: ${chrom}"
 SCRIPT
   done
@@ -145,16 +148,22 @@ task PlinkSubset {
   echo "Variants: $(wc -l < '~{snplist}') SNPs"
   echo ""
 
+  # build renamed fam before extract: old_FID old_IID new_FID new_IID
+  awk -v p="~{plink_prefix}" 'BEGIN{OFS="\t"} {print $1,$2,$1,p"_"$2}' "$PLINK_PREFIX.fam" > update_ids.txt
   plink2 \
     --bfile "$PLINK_PREFIX" \
+    --update-ids update_ids.txt \
+    --make-just-fam \
+    --out renamed_tmp \
+    --threads ~{cpu}
+
+  plink2 \
+    --bfile "$PLINK_PREFIX" \
+    --fam renamed_tmp.fam \
     --extract "~{snplist}" \
     --make-bed \
     --out "~{out_prefix}" \
     --threads ~{cpu}
-
-  # rename IIDs in-place: plink_prefix_SAMPLE
-  awk -v p="~{plink_prefix}" 'BEGIN{OFS="\t"} {$2 = p"_"$2; print}' "~{out_prefix}.fam" > tmp.fam
-  mv tmp.fam "~{out_prefix}.fam"
 
   echo "Done."
   echo "  Samples:  $(wc -l < '~{out_prefix}.fam')"
