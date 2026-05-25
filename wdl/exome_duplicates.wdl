@@ -219,19 +219,12 @@ task RunGtcheck {
   NJOBS=$(( ${#CHUNKS[@]} < $(nproc) ? ${#CHUNKS[@]} : $(nproc) ))
   MEM_PER_JOB=$(( ~{memory_gb} * 1024 / NJOBS ))
 
-  # split.sh: plink2 conversion per chunk
+  # split.sh: plink2 conversion + index per chunk
   SPLIT_SH="${PREFIX}_split.sh"
   for chunk in "${CHUNKS[@]}"; do
-    echo "plink2 --bfile plink_in --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB}"
+    echo "plink2 --bfile plink_in --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB} && bcftools index -t ${chunk}_ref.vcf.gz"
   done > "$SPLIT_SH"
   parallel -j "$(nproc)" < "$SPLIT_SH"
-
-  # index chunk_00 and copy tbi to all other chunks
-  bcftools index -t "${PREFIX}_chunk_00_ref.vcf.gz"
-  for chunk in "${CHUNKS[@]}"; do
-    [[ "$chunk" == "${PREFIX}_chunk_00" ]] && continue
-    cp "${PREFIX}_chunk_00_ref.vcf.gz.tbi" "${chunk}_ref.vcf.gz.tbi"
-  done
 
   # gtcheck.sh: one gtcheck per chunk
   GTCHECK_SH="${PREFIX}_gtcheck.sh"
