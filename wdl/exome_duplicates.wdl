@@ -91,7 +91,7 @@ task SubsetVCF {
     safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
     cat > "${SCRIPT_DIR}/run_${safe_chrom}.sh" << SCRIPT
 #!/bin/bash
-bcftools view -r "${chrom}" -T "./tmp/pos_${safe_chrom}.txt" "${VCF}" | bcftools reheader -s ./sample_rename.txt -o "chunk_${safe_chrom}.vcf.gz"
+bcftools view -r "${chrom}" -T "./tmp/pos_${safe_chrom}.txt" "${VCF}" | bcftools reheader -s ./sample_rename.txt | bgzip -c > "chunk_${safe_chrom}.vcf.gz"
 echo "Done: ${chrom}"
 SCRIPT
   done

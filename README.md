@@ -10,9 +10,9 @@ Sample matching identifies which exome samples correspond to samples in the Finn
 
 For each exome dataset:
 
-1. **SubsetVCF**: Pre-filters the exome VCF to only the positions present in the reference `.bim` file. Runs one `bcftools view -T` job per chromosome in parallel using the tabix index for fast positional lookup. Chunks are concatenated into a single filtered VCF and a SNP ID list is written for the next step.
+1. **SubsetVCF**: Pre-filters the exome VCF to only the positions present in the reference `.bim` file. Runs one `bcftools view -T` job per chromosome in parallel using the tabix index for fast positional lookup. Chunks are concatenated into a single filtered VCF, sample IDs are reheadered with the dataset prefix (e.g. `BOTNIA_SAMPLE1`) so query samples are unambiguously labelled in the gtcheck output, and a SNP ID list is written for the next step.
 
-2. **PlinkSubset**: Subsets the plink reference to the SNPs from SubsetVCF (`--extract`) and renames all sample IIDs in-place to `plink_prefix_SAMPLE` (e.g. `finngen_R14_hm3_FINNGEN_R14_XX00000001`) so reference samples are unambiguously labelled in the gtcheck output.
+2. **PlinkSubset**: Subsets the plink reference to the SNPs from SubsetVCF (`--extract`) and renames all sample IIDs in-place to `plink_prefix_SAMPLE` (e.g. `FG_XX00000001`) so reference samples are unambiguously labelled in the gtcheck output.
 
 3. **RunGtcheck**: Splits the renamed plink fam into chunks of `chunk_size` samples, converts each chunk to a bgzipped VCF with plink2 in parallel (32 CPUs, memory divided equally across jobs), indexes chunk_00 and copies the `.tbi` to all other chunks, then runs `bcftools gtcheck --no-HWE-prob` for each chunk in parallel. Results are merged and summarised: for each query sample the best match, second-best match, average concordance across all others, and the ratio best/average are reported.
 
