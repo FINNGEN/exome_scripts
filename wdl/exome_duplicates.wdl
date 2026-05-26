@@ -30,20 +30,35 @@ workflow exome_duplicates {
         snplist        = SubsetVCF.snplist
     }
 
+    # split ref VCF into indexed chunks (cached independently)
+    call SplitRefVCF {
+      input:
+        ref_vcf    = PlinkSubset.ref_vcf,
+        ref_tbi    = PlinkSubset.ref_tbi,
+        chunk_size = chunk_size
+    }
+
     # find cross-dataset duplicates by genotype concordance
     call RunGtcheck {
       input:
-        query_vcf   = SubsetVCF.filtered_vcf,
-        query_tbi   = SubsetVCF.filtered_vcf_tbi,
-        plink_files = PlinkSubset.plink_out,
-        prefix      = pair[0] + "_gtcheck",
-        chunk_size  = chunk_size
+        query_vcf = SubsetVCF.filtered_vcf,
+        query_tbi = SubsetVCF.filtered_vcf_tbi,
+        ref_vcfs  = SplitRefVCF.chunk_vcfs,
+        ref_tbis  = SplitRefVCF.chunk_tbis,
+        prefix    = pair[0] + "_gtcheck"
+    }
+
+    call SummarizeGtcheck {
+      input:
+        gtcheck_raw = RunGtcheck.gtcheck_raw,
+        prefix      = pair[0] + "_gtcheck"
     }
   }
 
   output {
     Array[File] gtcheck_raw     = RunGtcheck.gtcheck_raw
-    Array[File] gtcheck_summary = RunGtcheck.gtcheck_summary
+    Array[File] gtcheck_summary = SummarizeGtcheck.gtcheck_summary
+    Array[File] gtcheck_plot    = SummarizeGtcheck.gtcheck_plot
   }
 }
 
@@ -137,7 +152,7 @@ task PlinkSubset {
   }
 
   File   plink_bed  = plink_files[0]
-  Int    disk_size  = ceil(size(plink_bed, 'GB') * 2) + 10
+  Int    disk_size  = ceil(size(plink_bed, 'GB') * 3) + 10
   String out_prefix = dataset_prefix + "_" + plink_prefix
 
   command <<<
@@ -165,6 +180,14 @@ task PlinkSubset {
     --out "~{out_prefix}" \
     --threads ~{cpu}
 
+  plink2 \
+    --bfile "~{out_prefix}" \
+    --export vcf id-paste=iid bgz \
+    --output-chr chrM \
+    --out "~{out_prefix}" \
+    --threads ~{cpu}
+  bcftools index -t "~{out_prefix}.vcf.gz"
+
   echo "Done."
   echo "  Samples:  $(wc -l < '~{out_prefix}.fam')"
   echo "  Variants: $(wc -l < '~{out_prefix}.bim')"
@@ -172,6 +195,45 @@ task PlinkSubset {
 
   output {
     Array[File] plink_out = ["~{out_prefix}.bed", "~{out_prefix}.bim", "~{out_prefix}.fam"]
+    File        ref_vcf   = out_prefix + ".vcf.gz"
+    File        ref_tbi   = out_prefix + ".vcf.gz.tbi"
+  }
+
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks:  "local-disk ~{disk_size} HDD"
+    cpu:    cpu
+  }
+}
+
+task SplitRefVCF {
+  input {
+    File   ref_vcf
+    File   ref_tbi
+    Int    chunk_size = 100
+    Int    cpu        = 4
+    Int    memory_gb  = 8
+  }
+
+  Int disk_size = ceil(size(ref_vcf, 'GB') * 2) + 10
+
+  command <<<
+  set -euo pipefail
+  touch "~{ref_tbi}"
+  REF_VCF="~{ref_vcf}"
+
+  bcftools query -l "$REF_VCF" | split -d -l ~{chunk_size} - "samples_chunk_"
+
+  for chunk in samples_chunk_*; do
+    echo "bcftools view -S ${chunk} -Oz --write-index=tbi -o ${chunk}.vcf.gz ${REF_VCF}"
+  done | parallel -j "$(nproc)"
+
+  rm samples_chunk_*
+  >>>
+
+  output {
+    Array[File] chunk_vcfs = glob("samples_chunk_*.vcf.gz")
+    Array[File] chunk_tbis = glob("samples_chunk_*.vcf.gz.tbi")
   }
 
   runtime {
@@ -185,62 +247,74 @@ task RunGtcheck {
   input {
     File        query_vcf
     File        query_tbi
-    Array[File] plink_files
+    Array[File] ref_vcfs
+    Array[File] ref_tbis
     String      prefix
-    Int         chunk_size = 100
-    Int         cpu        = 32
-    Int         memory_gb  = 32
+    Int         cpu       = 32
+    Int         memory_gb = 2*cpu
   }
 
-  File plink_bed = plink_files[0]
-  Int  disk_size = ceil(size(query_vcf, 'GB') + size(plink_bed, 'GB')) * 3 + 20
+  Int disk_size = ceil(size(query_vcf, 'GB') + size(ref_vcfs, 'GB')) * 4 + 20
 
   command <<<
   set -euo pipefail
   touch "~{query_tbi}"
-
-  # symlink plink files to a consistent local prefix
-  ln -s "~{plink_files[0]}" plink_in.bed
-  ln -s "~{plink_files[1]}" plink_in.bim
-  ln -s "~{plink_files[2]}" plink_in.fam
+  xargs touch < ~{write_lines(ref_tbis)}
 
   QUERY_VCF="~{query_vcf}"
   PREFIX="~{prefix}"
 
   echo "Query: $QUERY_VCF ($(bcftools query -l "$QUERY_VCF" | wc -l) samples)"
-  echo "Ref:   $(wc -l < plink_in.fam) samples, $(wc -l < plink_in.bim) variants"
-  echo "Chunks: ~{chunk_size} samples each"
+  echo "Chunks: $(wc -l < ~{write_lines(ref_vcfs)}) VCF chunks"
   echo ""
 
-  # fam already has renamed IIDs from PlinkSubset — split directly
-  awk '{print $1, $2}' plink_in.fam | split -d -l ~{chunk_size} - "${PREFIX}_chunk_"
-  mapfile -t CHUNKS < <(ls "${PREFIX}_chunk_"*)
+  PIPELINE_SH="${PREFIX}_pipeline.sh"
+  while IFS= read -r chunk_vcf; do
+    name=$(basename "$chunk_vcf" .vcf.gz)
+    echo "bcftools gtcheck --no-HWE-prob -g ${chunk_vcf} ${QUERY_VCF} > chunk_${name}.gtcheck"
+  done < ~{write_lines(ref_vcfs)} > "$PIPELINE_SH"
+  parallel -j "$(nproc)" < "$PIPELINE_SH"
 
-  NJOBS=$(( ${#CHUNKS[@]} < $(nproc) ? ${#CHUNKS[@]} : $(nproc) ))
-  MEM_PER_JOB=$(( ~{memory_gb} * 1024 / NJOBS ))
+  cat chunk_*.gtcheck > "${PREFIX}.gtcheck"
+  rm -f chunk_*.gtcheck "$PIPELINE_SH"
 
-  # split.sh: plink2 conversion + index per chunk
-  SPLIT_SH="${PREFIX}_split.sh"
-  for chunk in "${CHUNKS[@]}"; do
-    echo "plink2 --bfile plink_in --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB} && bcftools index -t ${chunk}_ref.vcf.gz"
-  done > "$SPLIT_SH"
-  parallel -j "$(nproc)" < "$SPLIT_SH"
+  echo "Done. $(awk '/^DCv2/' "${PREFIX}.gtcheck" | wc -l) pairwise comparisons written."
+  >>>
 
-  # gtcheck.sh: one gtcheck per chunk
-  GTCHECK_SH="${PREFIX}_gtcheck.sh"
-  for chunk in "${CHUNKS[@]}"; do
-    echo "bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.vcf.gz ${QUERY_VCF} > ${chunk}.gtcheck && rm ${chunk}_ref.vcf.gz ${chunk}_ref.vcf.gz.tbi"
-  done > "$GTCHECK_SH"
-  parallel -j "$(nproc)" < "$GTCHECK_SH"
+  output {
+    File gtcheck_raw = prefix + ".gtcheck"
+  }
 
-  cat "${PREFIX}_chunk_"*.gtcheck > "${PREFIX}.gtcheck"
-  rm -f "${PREFIX}_chunk_"* "$SPLIT_SH" "$GTCHECK_SH"
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks:  "local-disk ~{disk_size} HDD"
+    cpu:    cpu
+  }
+}
 
-  python3 - "${PREFIX}.gtcheck" << 'PYEOF' > "${PREFIX}.summary.tsv"
-import sys
+task SummarizeGtcheck {
+  input {
+    File   gtcheck_raw
+    String prefix
+  }
+
+
+  command <<<
+  set -euo pipefail
+  GTCHECK_RAW="~{gtcheck_raw}"
+  PREFIX="~{prefix}"
+
+  python3 - "$GTCHECK_RAW" "${PREFIX}.summary.tsv" "${PREFIX}.distribution.png" "$PREFIX" << 'PYEOF'
+import sys, math, matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import gaussian_kde
+
+gtcheck_file, summary_file, out_png, prefix = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 stats = {}
-with open(sys.argv[1]) as f:
+with open(gtcheck_file) as f:
     for line in f:
         if not line.startswith('DCv2'):
             continue
@@ -249,7 +323,8 @@ with open(sys.argv[1]) as f:
         nsites = int(parts[5])
         rate = float(parts[3]) / nsites if nsites > 0 else 1.0
         if query not in stats:
-            stats[query] = {'best': (rate, ref), 'second': None, 'sum': rate, 'count': 1}
+            near = [(rate, ref)] if rate < 0.02 else []
+            stats[query] = {'best': (rate, ref), 'second': None, 'sum': rate, 'count': 1, 'near': near}
         else:
             s = stats[query]
             s['sum'] += rate
@@ -259,34 +334,71 @@ with open(sys.argv[1]) as f:
                 s['best'] = (rate, ref)
             elif s['second'] is None or rate < s['second'][0]:
                 s['second'] = (rate, ref)
+            if rate < 0.02:
+                s['near'].append((rate, ref))
 
-print('\t'.join(['QUERY','BEST_MATCH','BEST_RATE','2ND_MATCH','2ND_RATE','AVG_OTHERS','RATIO']))
 rows = []
 for query, s in stats.items():
     best_rate, best_ref = s['best']
     second_rate, second_ref = s['second'] if s['second'] else (float('nan'), 'N/A')
     avg_others = (s['sum'] - best_rate) / (s['count'] - 1) if s['count'] > 1 else float('nan')
     ratio = best_rate / avg_others if avg_others > 0 else float('nan')
-    rows.append((best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio))
+    note_map = {ref: r for r, ref in s['near'] if ref != best_ref}
+    if (second_ref != 'N/A' and second_ref not in note_map
+            and not math.isnan(avg_others) and avg_others > 0
+            and second_rate / avg_others < 0.1):
+        note_map[second_ref] = second_rate
+    near_others = sorted(note_map.items(), key=lambda x: x[1])
+    notes = ('{' + ','.join(f'{ref}:{r:.4f}' for ref, r in near_others) + '}') if near_others else ''
+    rows.append((best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio, notes))
 rows.sort()
-for best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio in rows:
-    print(f'{query}\t{best_ref}\t{best_rate:.6f}\t{second_ref}\t{second_rate:.6f}\t{avg_others:.6f}\t{ratio:.6f}')
-PYEOF
 
-  echo ""
-  echo "Done."
-  echo "  Sites compared: $(awk '/^DCv2/ {print $6; exit}' "${PREFIX}.gtcheck")"
-  echo "  Likely duplicates (ratio < 0.1): $(awk -F'\t' 'NR>1 && $7 < 0.1' "${PREFIX}.summary.tsv" | wc -l)"
+with open(summary_file, 'w') as out:
+    out.write('\t'.join(['QUERY','BEST_MATCH','BEST_RATE','2ND_MATCH','2ND_RATE','AVG_OTHERS','RATIO','NOTES']) + '\n')
+    for best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio, notes in rows:
+        out.write(f'{query}\t{best_ref}\t{best_rate:.6f}\t{second_ref}\t{second_rate:.6f}\t{avg_others:.6f}\t{ratio:.6f}\t{notes}\n')
+
+print(f"Summary: {summary_file}  ({len(rows)} queries, "
+      f"{sum(1 for r in rows if not math.isnan(r[6]) and r[6] < 0.1)} likely duplicates)")
+
+best_rates   = [r[0] for r in rows]
+second_rates = [r[4] for r in rows if not math.isnan(r[4])]
+avg_rates    = [r[5] for r in rows if not math.isnan(r[5])]
+# r[6]=ratio, r[7]=notes
+
+def kde_xy(data, n=500):
+    if len(data) < 2:
+        return None, None
+    kde = gaussian_kde(data)
+    xs = np.linspace(min(data), max(data), n)
+    return xs, kde(xs)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+layers = [
+    (avg_rates,    'Avg others',     '#b0b0b0', 1.2, 0.40, '--', 1),
+    (second_rates, '2nd best match', '#f5a42a', 2.0, 0.65, '-',  2),
+    (best_rates,   'Best match',     '#1a6db5', 2.8, 1.00, '-',  3),
+]
+for data, label, color, lw, alpha, ls, zorder in layers:
+    xs, ys = kde_xy(data)
+    if xs is None:
+        continue
+    ax.plot(xs, ys, color=color, linewidth=lw, alpha=alpha,
+            label=label, linestyle=ls, zorder=zorder)
+    ax.fill_between(xs, ys, alpha=alpha * 0.25, color=color, zorder=zorder)
+
+ax.set_xlabel('Discordance rate')
+ax.set_ylabel('Density')
+ax.set_title(f'Gtcheck discordance rate distributions\n{prefix}', fontsize=11)
+ax.legend()
+plt.tight_layout()
+plt.savefig(out_png, dpi=150)
+print(f"Plot:    {out_png}")
+PYEOF
   >>>
 
   output {
-    File gtcheck_raw     = prefix + ".gtcheck"
     File gtcheck_summary = prefix + ".summary.tsv"
-  }
-
-  runtime {
-    memory: "~{memory_gb} GB"
-    disks:  "local-disk ~{disk_size} HDD"
-    cpu:    cpu
+    File gtcheck_plot    = prefix + ".distribution.png"
   }
 }

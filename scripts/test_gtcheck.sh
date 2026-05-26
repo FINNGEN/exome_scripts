@@ -35,7 +35,6 @@ done
 [[ ! -f "${PLINK}.bed" ]] && { echo "ERROR: ${PLINK}.bed not found";      exit 1; }
 
 PLINK_NAME=$(basename "$PLINK")
-RENAMED_FAM="${PREFIX}_${PLINK_NAME}.fam"
 OUTPUT="${PREFIX}.gtcheck"
 SUMMARY="${PREFIX}.summary.tsv"
 
@@ -44,47 +43,52 @@ echo "Ref:   $PLINK"
 echo "Chunks: $CHUNK_SIZE samples each"
 echo ""
 
-# --- Build renamed fam (skip if already done) -----------------------------
-if [[ ! -f "$RENAMED_FAM" ]]; then
-    awk -v p="$PLINK_NAME" 'BEGIN{OFS="\t"} {$2 = p"_"$2; print}' "${PLINK}.fam" > "$RENAMED_FAM"
-    echo "Renamed fam: $RENAMED_FAM ($(wc -l < "$RENAMED_FAM") samples)"
-fi
-
 # --- Plink to VCF + gtcheck -----------------------------------------------
 if [[ -f "$OUTPUT" ]]; then
     echo "Skipping gtcheck — $OUTPUT already exists"
 else
-    awk '{print $1, $2}' "$RENAMED_FAM" | split -d -l "$CHUNK_SIZE" - "${PREFIX}_chunk_"
+    TOTAL_MEM_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+    OUT_DIR=$(dirname "$PREFIX")
+    REF_VCF="${OUT_DIR}/${PLINK_NAME}.vcf.gz"
+
+    if [[ ! -f "$REF_VCF" ]]; then
+        echo "Converting plink to VCF..."
+        plink2 --bfile "${PLINK}" --export vcf id-paste=iid bgz --output-chr chrM \
+            --out "${OUT_DIR}/${PLINK_NAME}" --threads "$(nproc)" --memory "$TOTAL_MEM_MB"
+        bcftools index -t "$REF_VCF"
+    else
+        echo "Reusing existing $REF_VCF"
+    fi
+
+    # Split sample IDs into chunks for parallel subsetting
+    awk '{print $2}' "${PLINK}.fam" \
+        | split -d -l "$CHUNK_SIZE" - "${PREFIX}_chunk_"
     mapfile -t CHUNKS < <(ls "${PREFIX}_chunk_"*)
 
-    NJOBS=$(( ${#CHUNKS[@]} < $(nproc) ? ${#CHUNKS[@]} : $(nproc) ))
-    TOTAL_MEM_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
-    MEM_PER_JOB=$(( TOTAL_MEM_MB / NJOBS ))
-
-    SPLIT_SH="${PREFIX}_split.sh"
-    GTCHECK_SH="${PREFIX}_gtcheck.sh"
-
-    # Write split.sh: plink2 + index per chunk
+    # One pipeline per chunk: subset+index simultaneously → gtcheck → cleanup
+    PIPELINE_SH="${PREFIX}_pipeline.sh"
     for chunk in "${CHUNKS[@]}"; do
-        echo "plink2 --bfile ${PLINK} --fam ${RENAMED_FAM} --keep ${chunk} --export vcf id-paste=iid bgz --output-chr chrM --out ${chunk}_ref --threads 1 --memory ${MEM_PER_JOB} && bcftools index -t ${chunk}_ref.vcf.gz"
-    done > "$SPLIT_SH"
-    parallel -j "$(nproc)" < "$SPLIT_SH"
+        echo "bcftools view -S ${chunk} -O z -o ${chunk}_ref.vcf.gz --write-index ${REF_VCF} && /usr/bin/time -v bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.vcf.gz ${QUERY_VCF} > ${chunk}.gtcheck 2> ${chunk}.memlog && rm ${chunk}_ref.vcf.gz ${chunk}_ref.vcf.gz.csi"
+    done > "$PIPELINE_SH"
+    parallel -j "$(nproc)" < "$PIPELINE_SH"
 
-    # Write gtcheck.sh: one gtcheck command per chunk
+    printf "\n%-25s %10s %12s\n" "CHUNK" "SAMPLES" "PEAK_RSS_MB"
     for chunk in "${CHUNKS[@]}"; do
-        echo "bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.vcf.gz ${QUERY_VCF} > ${chunk}.gtcheck && rm ${chunk}_ref.vcf.gz ${chunk}_ref.vcf.gz.tbi"
-    done > "$GTCHECK_SH"
-    parallel -j "$(nproc)" < "$GTCHECK_SH"
+        n=$(wc -l < "$chunk")
+        peak_kb=$(grep "Maximum resident set size" "${chunk}.memlog" 2>/dev/null | awk '{print $NF}')
+        printf "%-25s %10d %12d\n" "$(basename "$chunk")" "$n" "$(( ${peak_kb:-0} / 1024 ))"
+    done
+    echo ""
 
     cat "${PREFIX}_chunk_"*.gtcheck > "$OUTPUT"
-    rm -f "${PREFIX}_chunk_"* "$SPLIT_SH" "$GTCHECK_SH"
+    rm -f "${PREFIX}_chunk_"* "$PIPELINE_SH"
 fi
 echo "Output: $OUTPUT"
 echo ""
 
 # --- Summary --------------------------------------------------------------
-python3 - "$OUTPUT" << 'EOF' | tee "$SUMMARY"
-import sys
+python3 - "$OUTPUT" << 'EOF' > "$SUMMARY"
+import sys, math
 
 stats = {}
 with open(sys.argv[1]) as f:
@@ -97,7 +101,8 @@ with open(sys.argv[1]) as f:
         rate = float(parts[3]) / nsites if nsites > 0 else 1.0
 
         if query not in stats:
-            stats[query] = {'best': (rate, ref), 'second': None, 'sum': rate, 'count': 1}
+            near = [(rate, ref)] if rate < 0.02 else []
+            stats[query] = {'best': (rate, ref), 'second': None, 'sum': rate, 'count': 1, 'near': near}
         else:
             s = stats[query]
             s['sum'] += rate
@@ -107,9 +112,11 @@ with open(sys.argv[1]) as f:
                 s['best'] = (rate, ref)
             elif s['second'] is None or rate < s['second'][0]:
                 s['second'] = (rate, ref)
+            if rate < 0.02:
+                s['near'].append((rate, ref))
 
 header = (f"{'QUERY':<30} {'BEST_MATCH':<30} {'BEST_RATE':>10}"
-          f" {'2ND_MATCH':<30} {'2ND_RATE':>10} {'AVG_OTHERS':>12} {'RATIO':>8}")
+          f" {'2ND_MATCH':<30} {'2ND_RATE':>10} {'AVG_OTHERS':>12} {'RATIO':>8}  NOTES")
 print(header)
 
 rows = []
@@ -118,10 +125,81 @@ for query, s in stats.items():
     second_rate, second_ref = s['second'] if s['second'] else (float('nan'), 'N/A')
     avg_others = (s['sum'] - best_rate) / (s['count'] - 1) if s['count'] > 1 else float('nan')
     ratio = best_rate / avg_others if avg_others > 0 else float('nan')
-    rows.append((best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio))
+    # near_others: absolute rate < 2% (excluding best) + 2nd match if its ratio is also low
+    note_map = {ref: r for r, ref in s['near'] if ref != best_ref}
+    if (second_ref != 'N/A' and second_ref not in note_map
+            and not math.isnan(avg_others) and avg_others > 0
+            and second_rate / avg_others < 0.1):
+        note_map[second_ref] = second_rate
+    near_others = sorted(note_map.items(), key=lambda x: x[1])
+    notes = ('{' + ','.join(f'{ref}:{r:.4f}' for ref, r in near_others) + '}') if near_others else ''
+    rows.append((best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio, notes))
 
 rows.sort(key=lambda x: x[0])
-for best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio in rows:
+for best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio, notes in rows:
     print(f"{query:<30} {best_ref:<30} {best_rate:>10.4f}"
-          f" {second_ref:<30} {second_rate:>10.4f} {avg_others:>12.4f} {ratio:>8.4f}")
+          f" {second_ref:<30} {second_rate:>10.4f} {avg_others:>12.4f} {ratio:>8.4f}  {notes}")
+EOF
+
+# --- Plot distributions ---------------------------------------------------
+python3 - "$SUMMARY" "${PREFIX}.distribution.png" "$PREFIX" << 'EOF'
+import sys
+import math
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.stats import gaussian_kde
+
+summary_file, out_png, prefix = sys.argv[1], sys.argv[2], sys.argv[3]
+
+best_rates, second_rates, avg_rates = [], [], []
+with open(summary_file) as f:
+    for i, line in enumerate(f):
+        if i == 0:
+            continue
+        parts = line.split()
+        if len(parts) < 6:
+            continue
+        try:
+            best_rates.append(float(parts[2]))
+            second_rates.append(float(parts[4]))
+            avg_rates.append(float(parts[5]))
+        except (ValueError, IndexError):
+            continue
+
+if not best_rates:
+    print("No data to plot", file=sys.stderr)
+    sys.exit(0)
+
+def kde_xy(data, n=500):
+    clean = [x for x in data if not math.isnan(x)]
+    if len(clean) < 2:
+        return None, None
+    kde = gaussian_kde(clean)
+    xs = np.linspace(min(clean), max(clean), n)
+    return xs, kde(xs)
+
+fig, ax = plt.subplots(figsize=(10, 5))
+
+layers = [
+    (avg_rates,    'Avg others',     '#b0b0b0', 1.2, 0.40, '--', 1),
+    (second_rates, '2nd best match', '#f5a42a', 2.0, 0.65, '-',  2),
+    (best_rates,   'Best match',     '#1a6db5', 2.8, 1.00, '-',  3),
+]
+for data, label, color, lw, alpha, ls, zorder in layers:
+    xs, ys = kde_xy(data)
+    if xs is None:
+        continue
+    ax.plot(xs, ys, color=color, linewidth=lw, alpha=alpha,
+            label=label, linestyle=ls, zorder=zorder)
+    ax.fill_between(xs, ys, alpha=alpha * 0.25, color=color, zorder=zorder)
+
+ax.set_xlabel('Discordance rate')
+ax.set_ylabel('Density')
+ax.set_title(f'Gtcheck discordance rate distributions\n{prefix}', fontsize=11)
+ax.legend()
+plt.tight_layout()
+plt.savefig(out_png, dpi=150)
+print(f"Plot saved: {out_png}")
 EOF
