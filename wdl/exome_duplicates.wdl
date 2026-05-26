@@ -6,7 +6,8 @@ workflow exome_duplicates {
     File   plink_bed
     String plink_prefix
     File?  bim
-    Int    chunk_size = 10000
+    Int    chunk_size   = 10000
+    Int    target_snps
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
@@ -16,9 +17,10 @@ workflow exome_duplicates {
     # pre-filter VCF to bim SNPs (parallel bcftools per chrom, streaming)
     call SubsetVCF {
       input:
-        prefix    = pair[0],
-        input_vcf = pair[1],
-        bim       = select_first([bim, plink_bim])
+        prefix      = pair[0],
+        input_vcf   = pair[1],
+        bim         = select_first([bim, plink_bim]),
+        target_snps = target_snps
     }
 
     # subset plink to snplist and rename sample IDs with plink_prefix
@@ -67,6 +69,7 @@ task SubsetVCF {
     String prefix
     File   input_vcf
     File   bim
+    Int    target_snps
     Int    cpu       = 24
     Int    memory_gb = cpu
   }
@@ -128,6 +131,24 @@ SCRIPT
   echo "Variants after filter: $N_AFTER"
 
   bcftools query -f '%ID\n' "$OUTPUT_VCF" > "${PREFIX}.snplist.txt"
+  TARGET_SNPS=~{target_snps}
+
+  # intersect VCF IDs with BIM IDs to ensure ID consistency after position-based filtering
+  awk '{print $2}' "$BIM" > bim_ids.txt
+  comm -12 <(sort "${PREFIX}.snplist.txt") <(sort bim_ids.txt) > "${PREFIX}.snplist.intersect.txt"
+  N_INTERSECT=$(wc -l < "${PREFIX}.snplist.intersect.txt")
+  echo "Variants in BIM ID intersection: $N_INTERSECT"
+
+  if [[ $N_INTERSECT -gt $TARGET_SNPS ]]; then
+    shuf -n "$TARGET_SNPS" "${PREFIX}.snplist.intersect.txt" | sort -V > "${PREFIX}.snplist.txt"
+  else
+    sort -V "${PREFIX}.snplist.intersect.txt" > "${PREFIX}.snplist.txt"
+  fi
+
+  bcftools view -i "ID=@${PREFIX}.snplist.txt" -Oz -o "${PREFIX}.subset2.vcf.gz" "$OUTPUT_VCF"
+  mv "${PREFIX}.subset2.vcf.gz" "$OUTPUT_VCF"
+  bcftools index -t "$OUTPUT_VCF"
+  echo "SNPs after intersection+subsample: $(wc -l < "${PREFIX}.snplist.txt")"
   >>>
 
   output {
@@ -278,11 +299,10 @@ task RunGtcheck {
     Array[File] ref_tbis
     String      prefix
     Int         cpu = 32
-    String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:bcftools-latest"
   }
 
   Int effective_cpu = if length(ref_vcfs) < cpu then length(ref_vcfs) else cpu
-  Int memory_gb     = effective_cpu * 2
+  Int memory_gb     =  ceil(effective_cpu/2.0)
   Int disk_size     = ceil(size(query_vcf, 'GB') + size(ref_vcfs[0], 'GB') * length(ref_vcfs)) + 20
 
   command <<<
@@ -317,7 +337,6 @@ task RunGtcheck {
   }
 
   runtime {
-    docker : "~{docker}"
     memory: "~{memory_gb} GB"
     disks:  "local-disk ~{disk_size} HDD"
     cpu:    effective_cpu
