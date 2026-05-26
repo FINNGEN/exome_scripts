@@ -78,9 +78,11 @@ task SubsetVCF {
   command <<<
   set -euo pipefail
   VCF="~{input_vcf}"
-  touch "~{input_vcf_tbi}"
+  INPUT_VCF_TBI="~{input_vcf_tbi}"
   BIM="~{bim}"
   OUTPUT_VCF="~{output_vcf}"
+  PREFIX="~{prefix}"
+  touch "$INPUT_VCF_TBI"
   CHUNKS=$(( $(nproc) - 1 ))
   if [[ $CHUNKS -lt 1 ]]; then CHUNKS=1; fi
 
@@ -99,7 +101,7 @@ task SubsetVCF {
   done
 
   # build sample rename map: OLD_NAME -> PREFIX_OLD_NAME
-  bcftools query -l "$VCF" | awk -v p="~{prefix}" '{print $0"\t"p"_"$0}' > sample_rename.txt
+  bcftools query -l "$VCF" | awk -v p="$PREFIX" '{print $0"\t"p"_"$0}' > sample_rename.txt
 
   SCRIPT_DIR=$(mktemp -d)
   for chrom in "${chromosomes[@]}"; do
@@ -125,7 +127,7 @@ SCRIPT
   N_AFTER=$(bcftools index -s "$OUTPUT_VCF" | awk '{sum+=$3} END {print sum}')
   echo "Variants after filter: $N_AFTER"
 
-  bcftools query -f '%ID\n' "$OUTPUT_VCF" > "~{prefix}.snplist.txt"
+  bcftools query -f '%ID\n' "$OUTPUT_VCF" > "${PREFIX}.snplist.txt"
   >>>
 
   output {
@@ -158,39 +160,43 @@ task PlinkSubset {
   command <<<
   set -euo pipefail
   PLINK_PREFIX="~{sub(plink_bed, '\\.bed$', '')}"
+  SNPLIST="~{snplist}"
+  RENAME_PREFIX="~{plink_prefix}"
+  OUT_PREFIX="~{out_prefix}"
+  CPU=~{cpu}
 
   echo "Ref:      $PLINK_PREFIX"
-  echo "Variants: $(wc -l < '~{snplist}') SNPs"
+  echo "Variants: $(wc -l < "$SNPLIST") SNPs"
   echo ""
 
   # build renamed fam before extract: old_FID old_IID new_FID new_IID
-  awk -v p="~{plink_prefix}" 'BEGIN{OFS="\t"} {print $1,$2,$1,p"_"$2}' "$PLINK_PREFIX.fam" > update_ids.txt
+  awk -v p="$RENAME_PREFIX" 'BEGIN{OFS="\t"} {print $1,$2,$1,p"_"$2}' "$PLINK_PREFIX.fam" > update_ids.txt
   plink2 \
     --bfile "$PLINK_PREFIX" \
     --update-ids update_ids.txt \
     --make-just-fam \
     --out renamed_tmp \
-    --threads ~{cpu}
+    --threads $CPU
 
   plink2 \
     --bfile "$PLINK_PREFIX" \
     --fam renamed_tmp.fam \
-    --extract "~{snplist}" \
+    --extract "$SNPLIST" \
     --make-bed \
-    --out "~{out_prefix}" \
-    --threads ~{cpu}
+    --out "$OUT_PREFIX" \
+    --threads $CPU
 
   plink2 \
-    --bfile "~{out_prefix}" \
+    --bfile "$OUT_PREFIX" \
     --export vcf id-paste=iid bgz \
     --output-chr chrM \
-    --out "~{out_prefix}" \
-    --threads ~{cpu}
-  bcftools index -t "~{out_prefix}.vcf.gz"
+    --out "$OUT_PREFIX" \
+    --threads $CPU
+  bcftools index -t "${OUT_PREFIX}.vcf.gz"
 
   echo "Done."
-  echo "  Samples:  $(wc -l < '~{out_prefix}.fam')"
-  echo "  Variants: $(wc -l < '~{out_prefix}.bim')"
+  echo "  Samples:  $(wc -l < "${OUT_PREFIX}.fam")"
+  echo "  Variants: $(wc -l < "${OUT_PREFIX}.bim")"
   >>>
 
   output {
@@ -210,25 +216,46 @@ task SplitRefVCF {
   input {
     File   ref_vcf
     File   ref_tbi
-    Int    chunk_size = 100
-    Int    cpu        = 4
-    Int    memory_gb  = 8
+    Int    chunk_size
+    Int    cpu        = 8
+    Int    memory_gb  = cpu*2
   }
 
   Int disk_size = ceil(size(ref_vcf, 'GB') * 2) + 10
 
   command <<<
   set -euo pipefail
-  touch "~{ref_tbi}"
   REF_VCF="~{ref_vcf}"
+  REF_TBI="~{ref_tbi}"
+  CHUNK_SIZE=~{chunk_size}
+  touch "$REF_TBI"
 
-  bcftools query -l "$REF_VCF" | split -d -l ~{chunk_size} - "samples_chunk_"
+  N_SAMPLES=$(bcftools query -l "$REF_VCF" | wc -l)
+  N_CHUNKS=$(( (N_SAMPLES + CHUNK_SIZE - 1) / CHUNK_SIZE ))
+  echo "Splitting $N_SAMPLES samples into $N_CHUNKS chunks of up to $CHUNK_SIZE..."
+
+  bcftools query -l "$REF_VCF" | split -d -l $CHUNK_SIZE - "samples_chunk_"
+  mapfile -t slist_files < <(ls samples_chunk_*)
+
+  INPUT_SIZE=$(stat -c%s "$REF_VCF")
+  (
+    while true; do
+      sleep 10
+      DONE=$(stat -c%s samples_chunk_*.bcf 2>/dev/null | awk '{s+=$1} END {print s+0}')
+      PCT=$(( INPUT_SIZE > 0 ? DONE * 100 / INPUT_SIZE : 0 ))
+      echo "  written: $(( DONE / 1024 / 1024 )) / $(( INPUT_SIZE / 1024 / 1024 )) MB  (${PCT}%)"
+    done
+  ) &
+  PROGRESS_PID=$!
 
   for chunk in samples_chunk_*; do
     echo "bcftools view -S ${chunk} -Ob --write-index -o ${chunk}.bcf ${REF_VCF}"
   done | parallel -j "$(nproc)"
 
-  rm samples_chunk_*
+  kill $PROGRESS_PID 2>/dev/null
+  wait $PROGRESS_PID 2>/dev/null || true
+  rm -f "${slist_files[@]}"
+  echo "Done: $N_CHUNKS BCF chunks created."
   >>>
 
   output {
@@ -250,29 +277,33 @@ task RunGtcheck {
     Array[File] ref_vcfs
     Array[File] ref_tbis
     String      prefix
-    Int         cpu       = 32
-    Int         memory_gb = 2*cpu
+    Int         cpu = 32
+    String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:bcftools-latest"
   }
 
-  Int disk_size = ceil(size(query_vcf, 'GB') + size(ref_vcfs, 'GB')) * 4 + 20
+  Int effective_cpu = if length(ref_vcfs) < cpu then length(ref_vcfs) else cpu
+  Int memory_gb     = effective_cpu * 2
+  Int disk_size     = ceil(size(query_vcf, 'GB') + size(ref_vcfs[0], 'GB') * length(ref_vcfs)) + 20
 
   command <<<
   set -euo pipefail
-  touch "~{query_tbi}"
-  xargs touch < ~{write_lines(ref_tbis)}
-
   QUERY_VCF="~{query_vcf}"
+  QUERY_TBI="~{query_tbi}"
   PREFIX="~{prefix}"
+  REF_VCFS_LIST="~{write_lines(ref_vcfs)}"
+  REF_TBIS_LIST="~{write_lines(ref_tbis)}"
+  touch "$QUERY_TBI"
 
   echo "Query: $QUERY_VCF ($(bcftools query -l "$QUERY_VCF" | wc -l) samples)"
-  echo "Chunks: $(wc -l < ~{write_lines(ref_vcfs)}) VCF chunks"
+  echo "Chunks: $(wc -l < "$REF_VCFS_LIST") VCF chunks"
   echo ""
 
   PIPELINE_SH="${PREFIX}_pipeline.sh"
-  while IFS= read -r chunk_vcf; do
-    name=$(basename "$chunk_vcf" .vcf.gz)
-    echo "bcftools gtcheck --no-HWE-prob -g ${chunk_vcf} ${QUERY_VCF} > chunk_${name}.gtcheck"
-  done < ~{write_lines(ref_vcfs)} > "$PIPELINE_SH"
+  paste "$REF_VCFS_LIST" "$REF_TBIS_LIST" | while IFS=$'\t' read -r vcf tbi; do
+    mv "$tbi" "${vcf}.csi"
+    name=$(basename "$vcf" .bcf)
+    echo "bcftools gtcheck --no-HWE-prob -g ${vcf} ${QUERY_VCF} > chunk_${name}.gtcheck"
+  done > "$PIPELINE_SH"
   parallel -j "$(nproc)" < "$PIPELINE_SH"
 
   cat chunk_*.gtcheck > "${PREFIX}.gtcheck"
@@ -286,9 +317,10 @@ task RunGtcheck {
   }
 
   runtime {
+    docker : "~{docker}"
     memory: "~{memory_gb} GB"
     disks:  "local-disk ~{disk_size} HDD"
-    cpu:    cpu
+    cpu:    effective_cpu
   }
 }
 

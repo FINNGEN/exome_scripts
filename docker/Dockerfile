@@ -12,5 +12,17 @@ RUN mkdir plink2 && cd plink2 && curl -O s3.amazonaws.com/plink2-assets/plink2_l
 #KING
 RUN wget https://www.kingrelatedness.com/Linux-king.tar.gz && tar -xzvf Linux-king.tar.gz -C /usr/local/bin && rm Linux*king*.tar.gz
 
+# Latest bcftools (built from source)
+RUN apt-get install -qqy --no-install-recommends \
+        gcc make autoconf zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev libssl-dev
+	
+RUN BCFTOOLS_VERSION=1.23.1 &&  \
+    curl -fsSL "https://github.com/samtools/bcftools/releases/download/${BCFTOOLS_VERSION}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" | tar -xj -C /tmp && \
+    cd "/tmp/bcftools-${BCFTOOLS_VERSION}" && \
+    ./configure --prefix=/usr/local && \
+    make -j"$(nproc)" && \
+    make install && \
+    rm -rf "/tmp/bcftools-${BCFTOOLS_VERSION}"
+
 ADD scripts ../scripts
 
