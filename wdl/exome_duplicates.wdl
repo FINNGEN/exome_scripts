@@ -225,15 +225,15 @@ task SplitRefVCF {
   bcftools query -l "$REF_VCF" | split -d -l ~{chunk_size} - "samples_chunk_"
 
   for chunk in samples_chunk_*; do
-    echo "bcftools view -S ${chunk} -Oz --write-index=tbi -o ${chunk}.vcf.gz ${REF_VCF}"
+    echo "bcftools view -S ${chunk} -Ob --write-index -o ${chunk}.bcf ${REF_VCF}"
   done | parallel -j "$(nproc)"
 
   rm samples_chunk_*
   >>>
 
   output {
-    Array[File] chunk_vcfs = glob("samples_chunk_*.vcf.gz")
-    Array[File] chunk_tbis = glob("samples_chunk_*.vcf.gz.tbi")
+    Array[File] chunk_vcfs = glob("samples_chunk_*.bcf")
+    Array[File] chunk_tbis = glob("samples_chunk_*.bcf.csi")
   }
 
   runtime {

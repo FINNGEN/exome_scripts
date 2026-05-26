@@ -55,7 +55,10 @@ else
         echo "Converting plink to VCF..."
         plink2 --bfile "${PLINK}" --export vcf id-paste=iid bgz --output-chr chrM \
             --out "${OUT_DIR}/${PLINK_NAME}" --threads "$(nproc)" --memory "$TOTAL_MEM_MB"
-        bcftools index -t "$REF_VCF"
+        bcftools index --tbi --threads 4 "$REF_VCF"
+    elif [[ ! -f "${REF_VCF}.tbi" ]]; then
+        echo "Reusing existing $REF_VCF — rebuilding missing index..."
+        bcftools index --tbi --threads 4 "$REF_VCF"
     else
         echo "Reusing existing $REF_VCF"
     fi
@@ -68,7 +71,7 @@ else
     # One pipeline per chunk: subset+index simultaneously → gtcheck → cleanup
     PIPELINE_SH="${PREFIX}_pipeline.sh"
     for chunk in "${CHUNKS[@]}"; do
-        echo "bcftools view -S ${chunk} -O z -o ${chunk}_ref.vcf.gz --write-index ${REF_VCF} && /usr/bin/time -v bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.vcf.gz ${QUERY_VCF} > ${chunk}.gtcheck 2> ${chunk}.memlog && rm ${chunk}_ref.vcf.gz ${chunk}_ref.vcf.gz.csi"
+        echo "bcftools view -S ${chunk} -O b --write-index -o ${chunk}_ref.bcf ${REF_VCF} && /usr/bin/time -v bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.bcf ${QUERY_VCF} > ${chunk}.gtcheck 2> ${chunk}.memlog && rm ${chunk}_ref.bcf ${chunk}_ref.bcf.csi"
     done > "$PIPELINE_SH"
     parallel -j "$(nproc)" < "$PIPELINE_SH"
 
