@@ -43,11 +43,13 @@ workflow exome_duplicates {
     # find cross-dataset duplicates by genotype concordance
     call RunGtcheck {
       input:
-        query_vcf = SubsetVCF.filtered_vcf,
-        query_tbi = SubsetVCF.filtered_vcf_tbi,
-        ref_vcfs  = SplitRefVCF.chunk_vcfs,
-        ref_tbis  = SplitRefVCF.chunk_tbis,
-        prefix    = pair[0] + "_gtcheck"
+        query_vcf       = SubsetVCF.filtered_vcf,
+        query_tbi       = SubsetVCF.filtered_vcf_tbi,
+        ref_vcfs        = SplitRefVCF.chunk_vcfs,
+        ref_tbis        = SplitRefVCF.chunk_tbis,
+        prefix          = pair[0] + "_gtcheck",
+        n_query_samples = SubsetVCF.n_query_samples,
+        n_ref_samples   = PlinkSubset.n_ref_samples
     }
 
     call SummarizeGtcheck {
@@ -149,12 +151,14 @@ SCRIPT
   mv "${PREFIX}.subset2.vcf.gz" "$OUTPUT_VCF"
   bcftools index -t "$OUTPUT_VCF"
   echo "SNPs after intersection+subsample: $(wc -l < "${PREFIX}.snplist.txt")"
+  bcftools query -l "$OUTPUT_VCF" | wc -l > n_query_samples.txt
   >>>
 
   output {
     File filtered_vcf     = output_vcf
     File filtered_vcf_tbi = output_vcf + ".tbi"
     File snplist          = prefix + ".snplist.txt"
+    Int  n_query_samples  = read_int("n_query_samples.txt")
   }
 
   runtime {
@@ -216,14 +220,16 @@ task PlinkSubset {
   bcftools index -t "${OUT_PREFIX}.vcf.gz"
 
   echo "Done."
-  echo "  Samples:  $(wc -l < "${OUT_PREFIX}.fam")"
   echo "  Variants: $(wc -l < "${OUT_PREFIX}.bim")"
+  bcftools query -l "${OUT_PREFIX}.vcf.gz" | wc -l > n_ref_samples.txt
+  echo "  Samples:  $(cat n_ref_samples.txt)"
   >>>
 
   output {
-    Array[File] plink_out = ["~{out_prefix}.bed", "~{out_prefix}.bim", "~{out_prefix}.fam"]
-    File        ref_vcf   = out_prefix + ".vcf.gz"
-    File        ref_tbi   = out_prefix + ".vcf.gz.tbi"
+    Array[File] plink_out    = ["~{out_prefix}.bed", "~{out_prefix}.bim", "~{out_prefix}.fam"]
+    File        ref_vcf      = out_prefix + ".vcf.gz"
+    File        ref_tbi      = out_prefix + ".vcf.gz.tbi"
+    Int         n_ref_samples = read_int("n_ref_samples.txt")
   }
 
   runtime {
@@ -298,12 +304,15 @@ task RunGtcheck {
     Array[File] ref_vcfs
     Array[File] ref_tbis
     String      prefix
+    Int         n_query_samples
+    Int         n_ref_samples
     Int         cpu = 32
   }
 
-  Int effective_cpu = if length(ref_vcfs) < cpu then length(ref_vcfs) else cpu
-  Int memory_gb     =  ceil(effective_cpu/2.0)
-  Int disk_size     = ceil(size(query_vcf, 'GB') + size(ref_vcfs[0], 'GB') * length(ref_vcfs)) + 20
+  Int effective_cpu     = if length(ref_vcfs) < cpu then length(ref_vcfs) else cpu
+  Int memory_gb         = ceil(effective_cpu/2.0)
+  Int gtcheck_output_gb = ceil(n_query_samples * n_ref_samples / 15000000.0)
+  Int disk_size         = ceil(size(query_vcf, 'GB') + size(ref_vcfs[0], 'GB') * length(ref_vcfs)) + gtcheck_output_gb + 20
 
   command <<<
   set -euo pipefail
@@ -324,16 +333,17 @@ task RunGtcheck {
     name=$(basename "$vcf" .bcf)
     echo "bcftools gtcheck --no-HWE-prob -g ${vcf} ${QUERY_VCF} > chunk_${name}.gtcheck"
   done > "$PIPELINE_SH"
+  export TMPDIR=$(pwd)
   parallel -j "$(nproc)" < "$PIPELINE_SH"
 
-  cat chunk_*.gtcheck > "${PREFIX}.gtcheck"
+  cat chunk_*.gtcheck | gzip > "${PREFIX}.gtcheck.gz"
   rm -f chunk_*.gtcheck "$PIPELINE_SH"
 
-  echo "Done. $(awk '/^DCv2/' "${PREFIX}.gtcheck" | wc -l) pairwise comparisons written."
+  echo "Done. $(zcat "${PREFIX}.gtcheck.gz" | awk '/^DCv2/' | wc -l) pairwise comparisons written."
   >>>
 
   output {
-    File gtcheck_raw = prefix + ".gtcheck"
+    File gtcheck_raw = prefix + ".gtcheck.gz"
   }
 
   runtime {
@@ -349,14 +359,14 @@ task SummarizeGtcheck {
     String prefix
   }
 
-
+  Int disk_size = ceil(size(gtcheck_raw, 'GB') * 2) + 10
   command <<<
   set -euo pipefail
   GTCHECK_RAW="~{gtcheck_raw}"
   PREFIX="~{prefix}"
 
   python3 - "$GTCHECK_RAW" "${PREFIX}.summary.tsv" "${PREFIX}.distribution.png" "$PREFIX" << 'PYEOF'
-import sys, math, matplotlib
+import sys, math, gzip, matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
@@ -365,7 +375,8 @@ from scipy.stats import gaussian_kde
 gtcheck_file, summary_file, out_png, prefix = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 stats = {}
-with open(gtcheck_file) as f:
+opener = gzip.open if gtcheck_file.endswith('.gz') else open
+with opener(gtcheck_file, 'rt') as f:
     for line in f:
         if not line.startswith('DCv2'):
             continue
@@ -452,4 +463,9 @@ PYEOF
     File gtcheck_summary = prefix + ".summary.tsv"
     File gtcheck_plot    = prefix + ".distribution.png"
   }
+
+  runtime {
+    disks:  "local-disk ~{disk_size} HDD"
+  }
+
 }
