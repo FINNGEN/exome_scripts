@@ -331,13 +331,13 @@ task RunGtcheck {
   paste "$REF_VCFS_LIST" "$REF_TBIS_LIST" | while IFS=$'\t' read -r vcf tbi; do
     mv "$tbi" "${vcf}.csi"
     name=$(basename "$vcf" .bcf)
-    echo "bcftools gtcheck --no-HWE-prob -g ${vcf} ${QUERY_VCF} > chunk_${name}.gtcheck"
+    echo "bcftools gtcheck --no-HWE-prob -g ${vcf} ${QUERY_VCF} | gzip > chunk_${name}.gtcheck.gz"
   done > "$PIPELINE_SH"
   export TMPDIR=$(pwd)
   parallel -j "$(nproc)" < "$PIPELINE_SH"
 
-  cat chunk_*.gtcheck | gzip > "${PREFIX}.gtcheck.gz"
-  rm -f chunk_*.gtcheck "$PIPELINE_SH"
+  cat chunk_*.gtcheck.gz > "${PREFIX}.gtcheck.gz"
+  rm -f chunk_*.gtcheck.gz "$PIPELINE_SH"
 
   echo "Done. $(zcat "${PREFIX}.gtcheck.gz" | awk '/^DCv2/' | wc -l) pairwise comparisons written."
   >>>

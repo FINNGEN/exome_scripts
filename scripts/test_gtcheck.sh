@@ -2,17 +2,17 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 <query_vcf> <plink_prefix> [output_prefix] [--parallel N]"
+    echo "Usage: $0 <query_vcf> <ref_vcf> [output_prefix] [--parallel N]"
     echo ""
     echo "  query_vcf    : Query VCF/BCF file (must be indexed)"
-    echo "  plink_prefix : Reference plink dataset (without .bed extension)"
+    echo "  ref_vcf      : Reference VCF/BCF file (must be indexed)"
     echo "  output_prefix: Output prefix (default: gtcheck_out)"
-    echo "  --parallel N : Chunk size for parallel plink2 runs (default: 1000000)"
+    echo "  --parallel N : Chunk size for parallel runs (default: 1000000)"
     exit 1
 }
 
 QUERY_VCF=""
-PLINK=""
+REF_VCF=""
 PREFIX="gtcheck_out"
 CHUNK_SIZE=1000000
 
@@ -22,56 +22,60 @@ while [[ $# -gt 0 ]]; do
         -*)         echo "ERROR: Unknown flag $1"; usage ;;
         *)
             if   [[ -z "$QUERY_VCF" ]]; then QUERY_VCF="$1"
-            elif [[ -z "$PLINK"     ]]; then PLINK="$1"
+            elif [[ -z "$REF_VCF"   ]]; then REF_VCF="$1"
             else                              PREFIX="$1"
             fi
             shift ;;
     esac
 done
 
-[[ -z "$QUERY_VCF" || -z "$PLINK" ]] && usage
+[[ -z "$QUERY_VCF" || -z "$REF_VCF" ]] && usage
 
-[[ ! -f "$QUERY_VCF" ]]   && { echo "ERROR: VCF not found: $QUERY_VCF";  exit 1; }
-[[ ! -f "${PLINK}.bed" ]] && { echo "ERROR: ${PLINK}.bed not found";      exit 1; }
+[[ ! -f "$QUERY_VCF" ]] && { echo "ERROR: VCF not found: $QUERY_VCF"; exit 1; }
+[[ ! -f "$REF_VCF"   ]] && { echo "ERROR: VCF not found: $REF_VCF";   exit 1; }
 
-PLINK_NAME=$(basename "$PLINK")
 OUTPUT="${PREFIX}.gtcheck"
 SUMMARY="${PREFIX}.summary.tsv"
 
 echo "Query: $QUERY_VCF"
-echo "Ref:   $PLINK"
+echo "Ref:   $REF_VCF"
 echo "Chunks: $CHUNK_SIZE samples each"
 echo ""
 
-# --- Plink to VCF + gtcheck -----------------------------------------------
+# --- Unphase + split + gtcheck -----------------------------------------------
 if [[ -f "$OUTPUT" ]]; then
     echo "Skipping gtcheck — $OUTPUT already exists"
 else
-    TOTAL_MEM_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
     OUT_DIR=$(dirname "$PREFIX")
-    REF_VCF="${OUT_DIR}/${PLINK_NAME}.vcf.gz"
+    REF_NAME=$(basename "$REF_VCF" | sed 's/\.vcf\.gz$//;s/\.bcf$//')
+    REF_VCF_UNPHASED="${OUT_DIR}/${REF_NAME}_unphased.vcf.gz"
+    QUERY_UNPHASED="${PREFIX}_query_unphased.vcf.gz"
 
-    if [[ ! -f "$REF_VCF" ]]; then
-        echo "Converting plink to VCF..."
-        plink2 --bfile "${PLINK}" --export vcf id-paste=iid bgz --output-chr chrM \
-            --out "${OUT_DIR}/${PLINK_NAME}" --threads "$(nproc)" --memory "$TOTAL_MEM_MB"
-        bcftools index --tbi --threads 4 "$REF_VCF"
-    elif [[ ! -f "${REF_VCF}.tbi" ]]; then
-        echo "Reusing existing $REF_VCF — rebuilding missing index..."
-        bcftools index --tbi --threads 4 "$REF_VCF"
+    if [[ ! -f "$REF_VCF_UNPHASED" ]] || [[ ! -f "${REF_VCF_UNPHASED}.tbi" ]]; then
+        echo "Unphasing ref VCF..."
+        bcftools view "$REF_VCF" | sed 's/\([0-9]\)|\([0-9]\)/\1\/\2/g' | bcftools view -O z --threads 4 -o "$REF_VCF_UNPHASED"
+        bcftools index --tbi --threads 4 "$REF_VCF_UNPHASED"
     else
-        echo "Reusing existing $REF_VCF"
+        echo "Reusing existing $REF_VCF_UNPHASED"
+    fi
+
+    if [[ ! -f "$QUERY_UNPHASED" ]] || [[ ! -f "${QUERY_UNPHASED}.tbi" ]]; then
+        echo "Unphasing query VCF..."
+        bcftools view "$QUERY_VCF" | sed 's/\([0-9]\)|\([0-9]\)/\1\/\2/g' | bcftools view -O z --threads 4 -o "$QUERY_UNPHASED"
+        bcftools index --tbi --threads 4 "$QUERY_UNPHASED"
+    else
+        echo "Reusing existing $QUERY_UNPHASED"
     fi
 
     # Split sample IDs into chunks for parallel subsetting
-    awk '{print $2}' "${PLINK}.fam" \
+    bcftools query -l "$REF_VCF_UNPHASED" \
         | split -d -l "$CHUNK_SIZE" - "${PREFIX}_chunk_"
     mapfile -t CHUNKS < <(ls "${PREFIX}_chunk_"*)
 
-    # One pipeline per chunk: subset+index simultaneously → gtcheck → cleanup
+    # One pipeline per chunk: subset+index → gtcheck → cleanup
     PIPELINE_SH="${PREFIX}_pipeline.sh"
     for chunk in "${CHUNKS[@]}"; do
-        echo "bcftools view -S ${chunk} -O b --write-index -o ${chunk}_ref.bcf ${REF_VCF} && /usr/bin/time -v bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.bcf ${QUERY_VCF} > ${chunk}.gtcheck 2> ${chunk}.memlog && rm ${chunk}_ref.bcf ${chunk}_ref.bcf.csi"
+        echo "bcftools view -S ${chunk} -O b --write-index -o ${chunk}_ref.bcf ${REF_VCF_UNPHASED} && /usr/bin/time -v bcftools gtcheck --no-HWE-prob -g ${chunk}_ref.bcf ${QUERY_UNPHASED} > ${chunk}.gtcheck 2> ${chunk}.memlog && rm ${chunk}_ref.bcf ${chunk}_ref.bcf.csi"
     done > "$PIPELINE_SH"
     parallel -j "$(nproc)" < "$PIPELINE_SH"
 
