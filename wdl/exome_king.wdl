@@ -239,10 +239,11 @@ task KingShards {
     Array[File] ref_plink
     String      ref_prefix
     Int         chunk_size
-    Int         cpu       = 32
-    Int         memory_gb = 64
+    Int         cpu            = 32
+    Int         mem_gb_per_cpu = 4
   }
 
+  Int         memory_gb      = cpu * mem_gb_per_cpu + 8
   String out_prefix = query_prefix + "_vs_" + ref_prefix
   Int    disk_size  = ceil((size(query_plink[0], 'GB') + size(ref_plink[0], 'GB')) * 3) + 20
 
@@ -270,7 +271,7 @@ task KingShards {
 
   PIPELINE_SH="${TMP_DIR}/pipeline.sh"
   for chunk in "${CHUNKS[@]}"; do
-    echo "plink2 --bfile ${R} --keep ${chunk} --make-bed --out ${chunk}_ref --threads 1 --memory 4000 --silent \
+    echo "plink2 --bfile ${R} --keep ${chunk} --make-bed --out ${chunk}_ref --threads 1 --memory ~{mem_gb_per_cpu * 1000} --silent \
       && king -b ${Q}.bed,${chunk}_ref.bed \
               --duplicate --cpu 1 --prefix ${chunk}_king > ${chunk}.kinglog 2>&1 \
       && rm -f ${chunk}_ref.bed ${chunk}_ref.bim ${chunk}_ref.fam ${chunk}_ref.log \
