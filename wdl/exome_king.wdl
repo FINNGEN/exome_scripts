@@ -84,7 +84,7 @@ workflow exome_king {
 
 
 # -----------------------------------------------------------------------
-# Step 3: Downsample shared SNP list to target (0 = use all)
+# Step 3: Downsample shared SNP list to target
 # -----------------------------------------------------------------------
 task SharedSNPs {
   input {
@@ -114,7 +114,7 @@ task SharedSNPs {
 
 
 # -----------------------------------------------------------------------
-# Steps 1+2+4+5: Subset VCF or plink to SNP list, return plink (no annotation)
+# Steps 1+2: Subset VCF or plink to SNP list, return plink (no annotation)
 # -----------------------------------------------------------------------
 task SubsetToPlink {
   input {
@@ -145,6 +145,7 @@ task SubsetToPlink {
     $INPUT_FLAG \
     --chr 1-22 \
     --extract _extract.txt \
+    --rm-dup exclude-all \
     --make-bed \
     --out "~{out_prefix}" \
     --threads ~{cpu} \
@@ -187,13 +188,13 @@ task PrepareDataset {
 
   # 1. subset to target SNPs
   plink2 \
-    --bed "~{input_plink[0]}" --bim "~{input_plink[1]}" --fam "~{input_plink[2]}" \
+    --bfile "~{sub(input_plink[0], '\\.bed$', '')}" \
     --extract "~{snp_list}" \
     --make-bed \
     --out subsetted \
     --threads ~{cpu}
 
-  # 2. het filter on subsetted data
+  # 2. het filter
   plink2 --bfile subsetted --freq --out subsetted --threads ~{cpu}
   plink2 --bfile subsetted --read-freq subsetted.afreq --het --out subsetted --threads ~{cpu}
 
@@ -248,13 +249,13 @@ task KingShards {
   command <<<
   set -euo pipefail
 
-  QUERY_PLINK="~{sub(query_plink[0], '\\.bed$', '')}"
-  REF_PLINK="~{sub(ref_plink[0], '\\.bed$', '')}"
+  Q="~{sub(query_plink[0], '\\.bed$', '')}"
+  R="~{sub(ref_plink[0],   '\\.bed$', '')}"
   QRY_PFX="~{query_prefix}_"
   CHUNK_SIZE=~{chunk_size}
 
-  echo "Query: $QUERY_PLINK  ($(wc -l < "~{query_plink[2]}") samples)"
-  echo "Ref:   $REF_PLINK  ($(wc -l < "~{ref_plink[2]}") samples)"
+  echo "Query: $Q  ($(wc -l < "~{query_plink[2]}") samples)"
+  echo "Ref:   $R  ($(wc -l < "~{ref_plink[2]}") samples)"
   echo "Chunk size: $CHUNK_SIZE"
   echo ""
 
@@ -262,28 +263,26 @@ task KingShards {
   mkdir -p "$TMP_DIR"
   trap "rm -rf '$TMP_DIR'" EXIT
 
-  awk '{print $1, $2}' "${REF_PLINK}.fam" \
+  awk '{print $1, $2}' "${R}.fam" \
     | split -d -l "$CHUNK_SIZE" - "${TMP_DIR}/chunk_"
   mapfile -t CHUNKS < <(ls "${TMP_DIR}/chunk_"*)
   echo "Running KING across ${#CHUNKS[@]} shards..."
 
   PIPELINE_SH="${TMP_DIR}/pipeline.sh"
-  WORKDIR=$(pwd)
   for chunk in "${CHUNKS[@]}"; do
-    echo "plink2 --bfile ${WORKDIR}/${REF_PLINK} --keep ${chunk} --make-bed --out ${chunk}_ref --threads 1 --memory 4000 --silent \
-      && king -b ${WORKDIR}/${QUERY_PLINK}.bed,${chunk}_ref.bed \
-              --bim ${WORKDIR}/${QUERY_PLINK}.bim,${chunk}_ref.bim \
-              --fam ${WORKDIR}/${QUERY_PLINK}.fam,${chunk}_ref.fam \
+    echo "plink2 --bfile ${R} --keep ${chunk} --make-bed --out ${chunk}_ref --threads 1 --memory 4000 --silent \
+      && king -b ${Q}.bed,${chunk}_ref.bed \
               --duplicate --cpu 1 --prefix ${chunk}_king > ${chunk}.kinglog 2>&1 \
       && rm -f ${chunk}_ref.bed ${chunk}_ref.bim ${chunk}_ref.fam ${chunk}_ref.log \
       || echo FAILED > ${chunk}.failed"
   done > "$PIPELINE_SH"
-  parallel --bar -j "$(nproc)" < "$PIPELINE_SH"
+  parallel -j "$(nproc)" < "$PIPELINE_SH"
 
   mapfile -t FAILED < <(ls "${TMP_DIR}/chunk_"*.failed 2>/dev/null || true)
   if [[ ${#FAILED[@]} -gt 0 ]]; then
-    echo "WARNING: ${#FAILED[@]} shard(s) failed:"
+    echo "ERROR: ${#FAILED[@]} shard(s) failed:"
     for f in "${FAILED[@]}"; do echo "  $(basename "$f" .failed)"; done
+    exit 1
   fi
 
   HEADER_WRITTEN=0
@@ -299,7 +298,7 @@ task KingShards {
       if (qry1 != qry2) print
     }' "$con" >> merged.con
   done
-  [[ $HEADER_WRITTEN -eq 0 ]] && printf "FID1\tID1\tFID2\tID2\tN_SNP\tKinship\tIBS0\n" > merged.con
+  [[ $HEADER_WRITTEN -eq 0 ]] && { echo "ERROR: no .con files produced"; exit 1; }
 
   gzip -c merged.con > "~{out_prefix}.con.gz"
   echo "Done. $(zcat "~{out_prefix}.con.gz" | tail -n +2 | wc -l) duplicate pairs found."
