@@ -39,13 +39,14 @@ workflow exome_king {
         target_snps = target_snps
     }
 
-    # Step 4+5: subset to target SNPs, het-filter, annotate IDs
+    # Step 4+5: subset to target SNPs, het-filter, annotate IDs, chunk
     call PrepareDataset as PrepQuery {
       input:
         input_plink = SubsetQuery.plink,
         snp_list    = SharedSNPs.snp_list,
         prefix      = pair[0],
-        max_het_F   = max_het_F
+        max_het_F   = max_het_F,
+        chunk_size  = chunk_size
     }
 
     call PrepareDataset as PrepRef {
@@ -53,16 +54,16 @@ workflow exome_king {
         input_plink = SubsetRef.plink,
         snp_list    = SharedSNPs.snp_list,
         prefix      = plink_prefix,
-        max_het_F   = max_het_F
+        max_het_F   = max_het_F,
+        chunk_size  = chunk_size
     }
 
     call KingShards {
       input:
-        query_plink  = PrepQuery.plink,
+        query_chunks = PrepQuery.chunks,
         query_prefix = pair[0],
-        ref_plink    = PrepRef.plink,
-        ref_prefix   = plink_prefix,
-        chunk_size   = chunk_size
+        ref_chunks   = PrepRef.chunks,
+        ref_prefix   = plink_prefix
     }
 
     call SummarizeKing {
@@ -122,21 +123,22 @@ task SubsetToPlink {
     Array[File] input_files  # [vcf] or [bed, bim, fam]
     File        snp_list
     String      out_prefix
-    Int         cpu       = 8
-    Int         memory_gb = 16
+    Int         cpu       = 16
   }
 
   Int disk_size = ceil(size(input_files[0], 'GB') * 3) + 20
+  Int memory_gb = 16
 
   command <<<
   set -euo pipefail
-  TOTAL_MEM_MB=$(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo)
+  # Cap plink2 at 12 GB — it will spill to disk rather than OOM the VM
+  TOTAL_MEM_MB=12288
 
   # normalise snp_list: bim files have 6 columns, extract col 2; plain ID files pass through
   awk 'NF > 1 {print $2} NF == 1 {print $1}' "~{snp_list}" > _extract.txt
 
   if [[ "~{input_type}" == "vcf" ]]; then
-    INPUT_FLAG="--vcf ~{input_files[0]}"
+    INPUT_FLAG="--vcf ~{input_files[0]} --double-id"
   else
     INPUT_FLAG="--bfile ~{sub(input_files[0], '\\.bed$', '')}"
   fi
@@ -168,20 +170,21 @@ task SubsetToPlink {
 
 
 # -----------------------------------------------------------------------
-# Steps 4+5: Subset to target SNPs, filter high-F samples, tag sample IDs
+# Steps 4+5: Subset to target SNPs, filter high-F samples, tag IDs, chunk
 # -----------------------------------------------------------------------
 task PrepareDataset {
   input {
     Array[File] input_plink
     File        snp_list
     String      prefix
-    Float       max_het_F = 0.3
-    Int         cpu       = 4
-    Int         memory_gb = 16
+    Float       max_het_F  = 0.3
+    Int         chunk_size = 10000
+    Int         cpu        = 16
+    Int         memory_gb  = 8
   }
 
   String out_prefix = prefix + "_prepped"
-  Int    disk_size  = ceil(size(input_plink[0], 'GB') * 2) + 20
+  Int    disk_size  = ceil(size(input_plink[0], 'GB') * 4) + 20
 
   command <<<
   set -euo pipefail
@@ -201,6 +204,9 @@ task PrepareDataset {
   awk 'NR > 1 && $6 > ~{max_het_F} {print $1, $2}' subsetted.het > high_F_samples.txt
   echo "High-F samples excluded: $(wc -l < high_F_samples.txt)"
 
+  # Write het stats (header + outlier rows) for downstream inspection
+  awk 'NR == 1 || (NR > 1 && $6 > ~{max_het_F})' subsetted.het > het_outliers.tsv
+
   plink2 \
     --bfile subsetted \
     --remove high_F_samples.txt \
@@ -214,11 +220,29 @@ task PrepareDataset {
 
   echo "Final samples:  $(wc -l < "~{out_prefix}.fam")"
   echo "Final variants: $(wc -l < "~{out_prefix}.bim")"
+
+  # 4. split into sample chunks
+  awk '{print $1, $2}' "~{out_prefix}.fam" \
+    | split -d -l ~{chunk_size} - "~{out_prefix}_shard_"
+
+  for shard in "~{out_prefix}_shard_"*; do
+    idx="${shard##*_shard_}"
+    plink2 \
+      --bfile "~{out_prefix}" \
+      --keep "$shard" \
+      --make-bed \
+      --out "~{out_prefix}_chunk${idx}" \
+      --threads ~{cpu} \
+      --silent
+  done
+
+  echo "Created $(ls "~{out_prefix}_chunk"*.bed | wc -l) chunks of up to ~{chunk_size} samples"
   >>>
 
   output {
     Array[File] plink            = [out_prefix + ".bed", out_prefix + ".bim", out_prefix + ".fam"]
-    File        excluded_samples = "high_F_samples.txt"
+    File        excluded_samples = "het_outliers.tsv"
+    Array[File] chunks           = glob(out_prefix + "_chunk*")
   }
 
   runtime {
@@ -230,76 +254,57 @@ task PrepareDataset {
 
 
 # -----------------------------------------------------------------------
-# Step 8: Sharded KING --duplicate, output merged gzipped .con
+# Step 8: KING --duplicate across all N×M chunk pairs, sequential
 # -----------------------------------------------------------------------
 task KingShards {
   input {
-    Array[File] query_plink
+    Array[File] query_chunks   # all chunk bed+bim+fam files for query
     String      query_prefix
-    Array[File] ref_plink
+    Array[File] ref_chunks     # all chunk bed+bim+fam files for ref
     String      ref_prefix
-    Int         chunk_size
-    Int         cpu            = 32
-    Int         mem_gb_per_cpu = 4
+    Int         cpu = 32
   }
 
-  Int         memory_gb      = cpu * mem_gb_per_cpu + 8
+  Int mem_raw  = ceil((size(query_chunks[0], 'GB') + size(ref_chunks[0], 'GB')) * 20)
+  Int memory_gb = if mem_raw < 16 then 16 else mem_raw
   String out_prefix = query_prefix + "_vs_" + ref_prefix
-  Int    disk_size  = ceil((size(query_plink[0], 'GB') + size(ref_plink[0], 'GB')) * 3) + 20
+  Int    disk_size  = ceil((size(query_chunks, 'GB') + size(ref_chunks, 'GB')) * 2) + 20
 
   command <<<
   set -euo pipefail
 
-  Q="~{sub(query_plink[0], '\\.bed$', '')}"
-  R="~{sub(ref_plink[0],   '\\.bed$', '')}"
   QRY_PFX="~{query_prefix}_"
-  CHUNK_SIZE=~{chunk_size}
 
-  echo "Query: $Q  ($(wc -l < "~{query_plink[2]}") samples)"
-  echo "Ref:   $R  ($(wc -l < "~{ref_plink[2]}") samples)"
-  echo "Chunk size: $CHUNK_SIZE"
-  echo ""
+  # Write chunk file lists; filter to .bed and strip extension to get basepaths
+  grep '\.bed$' "~{write_lines(query_chunks)}" | sed 's/\.bed$//' > query_bases.txt
+  grep '\.bed$' "~{write_lines(ref_chunks)}"   | sed 's/\.bed$//' > ref_bases.txt
 
-  TMP_DIR="/dev/shm/king_~{out_prefix}"
-  mkdir -p "$TMP_DIR"
-  trap "rm -rf '$TMP_DIR'" EXIT
+  echo "Query chunks: $(wc -l < query_bases.txt)"
+  echo "Ref chunks:   $(wc -l < ref_bases.txt)"
 
-  awk '{print $1, $2}' "${R}.fam" \
-    | split -d -l "$CHUNK_SIZE" - "${TMP_DIR}/chunk_"
-  mapfile -t CHUNKS < <(ls "${TMP_DIR}/chunk_"*)
-  echo "Running KING across ${#CHUNKS[@]} shards..."
+  # Generate N×M pairs CSV (query_base,ref_base)
+  awk 'NR==FNR {a[$0]; next} {for (i in a) print i "," $0}' query_bases.txt ref_bases.txt > pairs.csv
 
-  PIPELINE_SH="${TMP_DIR}/pipeline.sh"
-  for chunk in "${CHUNKS[@]}"; do
-    echo "plink2 --bfile ${R} --keep ${chunk} --make-bed --out ${chunk}_ref --threads 1 --memory ~{mem_gb_per_cpu * 1000} --silent \
-      && king -b ${Q}.bed,${chunk}_ref.bed \
-              --duplicate --cpu 1 --prefix ${chunk}_king > ${chunk}.kinglog 2>&1 \
-      && rm -f ${chunk}_ref.bed ${chunk}_ref.bim ${chunk}_ref.fam ${chunk}_ref.log \
-      || echo FAILED > ${chunk}.failed"
-  done > "$PIPELINE_SH"
-  parallel -j "$(nproc)" < "$PIPELINE_SH"
+  TOTAL_PAIRS=$(wc -l < pairs.csv)
+  echo "Total chunk pairs: $TOTAL_PAIRS"
 
-  mapfile -t FAILED < <(ls "${TMP_DIR}/chunk_"*.failed 2>/dev/null || true)
-  if [[ ${#FAILED[@]} -gt 0 ]]; then
-    echo "ERROR: ${#FAILED[@]} shard(s) failed:"
-    for f in "${FAILED[@]}"; do echo "  $(basename "$f" .failed)"; done
-    exit 1
-  fi
-
+  # Run KING on each pair sequentially with all CPUs
   HEADER_WRITTEN=0
-  for chunk in "${CHUNKS[@]}"; do
-    con="${chunk}_king.con"
+  JOB=0
+  while IFS=',' read -r qbase rbase; do
+    JOB=$((JOB + 1))
+    echo "[$JOB/$TOTAL_PAIRS] $(basename "$qbase") vs $(basename "$rbase")"
+    pfx="$(basename "$qbase")_vs_$(basename "$rbase")"
+    king -b "${qbase}.bed,${rbase}.bed" --duplicate --cpu "$(nproc)" --prefix "$pfx"
+
+    con="${pfx}.con"
     [[ ! -f "$con" ]] && continue
-    if [[ $HEADER_WRITTEN -eq 0 ]]; then
-      head -1 "$con" > merged.con
-      HEADER_WRITTEN=1
-    fi
-    awk -v qp="$QRY_PFX" 'NR > 1 {
-      qry1 = ($2 ~ "^"qp); qry2 = ($4 ~ "^"qp)
-      if (qry1 != qry2) print
-    }' "$con" >> merged.con
-  done
-  [[ $HEADER_WRITTEN -eq 0 ]] && { echo "ERROR: no .con files produced"; exit 1; }
+
+    cat "$con" | awk -v qp="$QRY_PFX" -v hdr="$([ ! -f merged.con ] && echo 1 || echo 0)" '
+      NR==1 { if (hdr) print; next }
+      { if (($2 ~ "^"qp) != ($4 ~ "^"qp)) print }
+    ' >> merged.con
+  done < pairs.csv
 
   gzip -c merged.con > "~{out_prefix}.con.gz"
   echo "Done. $(zcat "~{out_prefix}.con.gz" | tail -n +2 | wc -l) duplicate pairs found."
@@ -326,7 +331,6 @@ task SummarizeKing {
     File   query_fam
     String query_prefix
     String ref_prefix
-    Int    memory_gb = 4
   }
 
   Int    disk_size  = ceil(size(duplicates_con, 'GB') * 2) + 10
@@ -336,32 +340,25 @@ task SummarizeKing {
   set -euo pipefail
 
   QRY_PFX="~{query_prefix}_"
-  REF_PFX="~{ref_prefix}_"
   SUMMARY="~{out_prefix}.summary.tsv"
 
-  # pass 1: build qid -> comma-separated rids from con.gz
-  zcat "~{duplicates_con}" | awk -v qp="$QRY_PFX" -v rp="$REF_PFX" '
+  # pass 1: FID ($1/$3) is the original sample name; use IID ($2/$4) only to identify query vs ref
+  zcat "~{duplicates_con}" | awk -v qp="$QRY_PFX" '
     NR==1 { next }
     {
-      id1=$2; id2=$4
-      if (substr(id1,1,length(qp))==qp) {
-        qid=substr(id1,length(qp)+1)
-        rid=(substr(id2,1,length(rp))==rp) ? substr(id2,length(rp)+1) : id2
-      } else if (substr(id2,1,length(qp))==qp) {
-        qid=substr(id2,length(qp)+1)
-        rid=(substr(id1,1,length(rp))==rp) ? substr(id1,length(rp)+1) : id1
-      } else next
+      if      ($2 ~ "^"qp) { qid=$1; rid=$3 }
+      else if ($4 ~ "^"qp) { qid=$3; rid=$1 }
+      else next
       m[qid] = (qid in m) ? m[qid] "," rid : rid
     }
     END { for (q in m) print q "\t" m[q] }
   ' > _matches.txt
 
-  # pass 2: join against fam order, write summary
+  # pass 2: join against fam using FID ($1) directly — no prefix stripping needed
   printf "QUERY\tDUPLICATES\n" > "$SUMMARY"
-  awk -v qp="$QRY_PFX" '
+  awk '
     NR==FNR { m[$1]=$2; next }
-    { raw=$2; qid=(substr(raw,1,length(qp))==qp) ? substr(raw,length(qp)+1) : raw
-      print qid "\t" (qid in m ? m[qid] : "MISSING") }
+    { print $1 "\t" ($1 in m ? m[$1] : "MISSING") }
   ' _matches.txt "~{query_fam}" >> "$SUMMARY"
 
   FOUND=$(awk 'NR>1 && $2!="MISSING"' "$SUMMARY" | wc -l)
@@ -374,7 +371,6 @@ task SummarizeKing {
   }
 
   runtime {
-    memory: "~{memory_gb} GB"
     disks:  "local-disk ~{disk_size} HDD"
   }
 }
