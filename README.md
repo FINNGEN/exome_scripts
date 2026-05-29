@@ -2,55 +2,7 @@
 
 ## SAMPLE MATCHING
 
-Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel. This is done using `exome_duplicates.wdl`, which measures genotype concordance between each exome VCF and the reference using `bcftools gtcheck`.
-
-### exome_duplicates.wdl
-
-**What it does:**
-
-For each exome dataset:
-
-1. **SubsetVCF**: Pre-filters the exome VCF to only the positions present in the reference `.bim` file. Runs one `bcftools view -T` job per chromosome in parallel using the tabix index for fast positional lookup. Chunks are concatenated into a single filtered VCF, sample IDs are reheadered with the dataset prefix (e.g. `BOTNIA_SAMPLE1`) so query samples are unambiguously labelled in the gtcheck output, and a SNP ID list is written for the next step.
-
-2. **PlinkSubset**: Subsets the plink reference to the SNPs from SubsetVCF (`--extract`) and renames all sample IIDs in-place to `plink_prefix_SAMPLE` (e.g. `FG_XX00000001`) so reference samples are unambiguously labelled in the gtcheck output.
-
-3. **RunGtcheck**: Splits the renamed plink fam into chunks of `chunk_size` samples, converts each chunk to a bgzipped VCF with plink2 in parallel (32 CPUs, memory divided equally across jobs), indexes chunk_00 and copies the `.tbi` to all other chunks, then runs `bcftools gtcheck --no-HWE-prob` for each chunk in parallel. Results are merged and summarised: for each query sample the best match, second-best match, average concordance across all others, and the ratio best/average are reported.
-
-**Inputs:**
-
-```json
-{
-  "exome_duplicates.vcf_pairs": [
-    ["BOTNIA", "gs://bucket/botnia.vcf.gz"],
-    ["ADPKD",  "gs://bucket/adpkd.vcf.gz"]
-  ],
-  "exome_duplicates.plink_bed":    "gs://bucket/finngen_R14_hm3.bed",
-  "exome_duplicates.plink_prefix": "FG",
-  "exome_duplicates.bim":          "gs://bucket/custom.bim",
-  "exome_duplicates.chunk_size":   100
-}
-```
-
-`vcf_pairs` is an array of `[prefix, vcf_path]` pairs. `bim` is optional — if omitted the `.bim` derived from `plink_bed` is used. `chunk_size` controls how many reference samples are processed per parallel plink2/gtcheck job (default 100).
-
-**Outputs:**
-
-- `gtcheck_raw[]`: Raw `bcftools gtcheck` output per dataset
-- `gtcheck_summary[]`: TSV summary per dataset with columns `QUERY`, `BEST_MATCH`, `BEST_RATE`, `2ND_MATCH`, `2ND_RATE`, `AVG_OTHERS`, `RATIO`
-
-**Reading the output:**
-
-Each row in the summary TSV is one query (exome) sample. `BEST_MATCH` is the most concordant reference sample. `RATIO` = `BEST_RATE / AVG_OTHERS` — a low ratio (< 0.1) indicates a likely true duplicate. `BEST_RATE` is the per-site discordance rate so lower = more similar.
-
-**Local testing:**
-
-`scripts/test_gtcheck.sh` replicates the RunGtcheck step locally:
-
-```bash
-scripts/test_gtcheck.sh <query.vcf.gz> <plink_prefix> [output_prefix] [--parallel N]
-```
-
----
+Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship (`exome_duplicates.wdl`).
 
 ### exome_duplicates.wdl
 
