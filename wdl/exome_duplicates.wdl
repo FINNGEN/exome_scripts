@@ -99,15 +99,26 @@ workflow exome_duplicates {
     }
   }
 
+  call GatherResults {
+    input:
+      summaries = SummarizeKing.summary,
+      plots     = SummarizeKing.plot,
+      snplists  = FilterSNPs.snplist
+  }
+
   output {
     Array[File]        subset_vcfs            = ConcatVCF.subset_vcf
     Array[File]        subset_tbis            = ConcatVCF.subset_tbi
     Array[File]        snplists               = FilterSNPs.snplist
     Array[File]        hq_snplists            = FilterSNPs.hq_snplist
     Array[File]        summary                = SummarizeKing.summary
+    Array[File]        concordance_plots      = SummarizeKing.plot
     Array[File]        duplicates_con         = KingShards.duplicates_con
     Array[File]        excluded_samples_query = PrepQuery.excluded_samples
     Array[File]        excluded_samples_ref   = PrepRef.excluded_samples
+    File               combined_summary       = GatherResults.combined_summary
+    File               combined_plot          = GatherResults.combined_plot
+    File               global_summary         = GatherResults.global_summary
   }
 }
 
@@ -383,7 +394,7 @@ task FilterSNPs {
   plink2 \
       --bfile      "$PREFIX" \
       --geno       "$MAX_GENO" \
-      --hwe        "$HWE_P" \
+      --hwe        "$HWE_P" 0 \
       --maf        "$MIN_MAF" \
       --write-snplist \
       --no-psam-pheno \
@@ -622,13 +633,152 @@ task SummarizeKing {
   FOUND=$(awk 'NR>1 && $2!="MISSING"' "$SUMMARY" | wc -l)
   TOTAL=$(awk 'NR>1' "$SUMMARY" | wc -l)
   echo "$FOUND/$TOTAL query samples have duplicates in ref"
+
+  # Plot concordance diagnostics
+  python3 << PYEOF
+  import pandas as pd
+  import matplotlib
+  matplotlib.use("Agg")
+  import matplotlib.pyplot as plt
+  import matplotlib.gridspec as gridspec
+
+  con_gz    = "$DUPLICATES_CON"
+  out_png   = "${OUT_PREFIX}_concordance.png"
+  threshold = 0.9
+
+  df      = pd.read_csv(con_gz, sep="\t", compression="gzip")
+  n_pairs = len(df)
+  n_dup   = (df["Concord"] >= threshold).sum()
+  is_dup  = df["Concord"] >= threshold
+  colors  = ["#d62728" if d else "#aec7e8" for d in is_dup]
+
+  fig = plt.figure(figsize=(14, 5))
+  fig.suptitle(f"{con_gz}  |  {n_pairs} pairs  |  {n_dup} duplicates (Concord >= {threshold})",fontsize=10, y=1.01)
+  gs = gridspec.GridSpec(1, 3, wspace=0.35)
+
+  ax1 = fig.add_subplot(gs[0])
+  ax1.hist(df["Concord"], bins=100, color="#4878d0", edgecolor="none")
+  ax1.axvline(threshold, color="#d62728", linestyle="--", linewidth=1)
+  ax1.set_xlabel("Concordance"); ax1.set_ylabel("Pairs"); ax1.set_title("Concordance distribution")
+
+  ax2 = fig.add_subplot(gs[1])
+  ax2.scatter(df["N_IBS0"], df["Concord"], c=colors, s=6, alpha=0.6, linewidths=0)
+  ax2.set_xlabel("N_IBS0"); ax2.set_ylabel("Concordance"); ax2.set_title("IBS0 vs Concordance")
+
+  ax3 = fig.add_subplot(gs[2])
+  ax3.hist(df["N"], bins=50, color="#4878d0", edgecolor="none")
+  ax3.set_xlabel("N SNPs"); ax3.set_ylabel("Pairs"); ax3.set_title("SNP count per pair")
+
+  fig.tight_layout()
+  fig.savefig(out_png, dpi=150, bbox_inches="tight")
+  print(f"Saved: {out_png}  ({n_dup}/{n_pairs} pairs above threshold)")
+  PYEOF
   >>>
 
   output {
     File summary = out_prefix + ".summary.tsv"
+    File plot    = out_prefix + "_concordance.png"
   }
 
   runtime {
     disks: "local-disk ~{disk_size} HDD"
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# Gather: combine all summaries and plots into one (always runs)
+# -----------------------------------------------------------------------
+task GatherResults {
+  input {
+    Array[File] summaries
+    Array[File] plots
+    Array[File] snplists
+  }
+
+  command <<<
+  set -euo pipefail
+
+  SUMMARIES_FILE="~{write_lines(summaries)}"
+  PLOTS_FILE="~{write_lines(plots)}"
+  SNPLISTS_FILE="~{write_lines(snplists)}"
+
+  python3 << PYEOF
+import pandas as pd
+import os
+
+with open("$SUMMARIES_FILE") as f:
+    summary_files = [l.strip() for l in f if l.strip()]
+with open("$SNPLISTS_FILE") as f:
+    snplist_files = [l.strip() for l in f if l.strip()]
+
+dfs = []
+global_rows = []
+
+for sf, sl in zip(summary_files, snplist_files):
+    dataset = os.path.basename(sf).replace(".summary.tsv", "")
+    df = pd.read_csv(sf, sep="\t")
+    df.insert(0, "DATASET", dataset)
+    dfs.append(df)
+
+    n_total     = len(df)
+    n_matched   = (df["DUPLICATES"] != "MISSING").sum()
+    n_ambiguous = df["DUPLICATES"].apply(lambda x: isinstance(x, str) and "," in x).sum()
+    n_snps      = sum(1 for _ in open(sl))
+
+    global_rows.append({
+        "DATASET":     dataset,
+        "TOTAL_QUERY": n_total,
+        "N_MATCHED":   n_matched,
+        "PCT_MATCHED": f"{n_matched / n_total * 100:.1f}%",
+        "N_AMBIGUOUS": n_ambiguous,
+        "N_SNPS":      n_snps,
+    })
+
+combined = pd.concat(dfs, ignore_index=True)
+combined.to_csv("combined_summary.tsv", sep="\t", index=False)
+
+global_df = pd.DataFrame(global_rows)
+global_df.to_csv("global_summary.tsv", sep="\t", index=False)
+
+print(global_df.to_string(index=False))
+PYEOF
+
+  python3 << PYEOF
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.image as mpimg
+import os
+
+with open("$PLOTS_FILE") as f:
+    plot_files = [l.strip() for l in f if l.strip()]
+
+fig, axes = plt.subplots(len(plot_files), 1, figsize=(14, 5 * len(plot_files)))
+if len(plot_files) == 1:
+    axes = [axes]
+for ax, pf in zip(axes, plot_files):
+    img = mpimg.imread(pf)
+    ax.imshow(img)
+    ax.axis("off")
+    ax.set_title(os.path.basename(pf).replace("_concordance.png", ""), fontsize=12, pad=8)
+plt.tight_layout()
+plt.savefig("combined_concordance.png", dpi=150, bbox_inches="tight")
+print(f"Combined {len(plot_files)} plots")
+PYEOF
+  >>>
+
+  output {
+    File combined_summary = "combined_summary.tsv"
+    File combined_plot    = "combined_concordance.png"
+    File global_summary   = "global_summary.tsv"
+  }
+
+  meta {
+    volatile: true
+  }
+
+  runtime {
+    disks: "local-disk 20 HDD"
   }
 }

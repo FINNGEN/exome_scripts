@@ -34,6 +34,9 @@ MakeRegionSnplists
                    │
             SummarizeKing
             (per-sample duplicate summary)
+                   │
+             GatherResults
+             (combine summaries, plots, global stats)
 ```
 
 **Step-by-step:**
@@ -54,7 +57,9 @@ MakeRegionSnplists
 
 8. **KingShards**: Runs `king --duplicate` across all query-chunk × ref-chunk pairs sequentially within the task. Filters the output to only cross-dataset pairs (one sample from query, one from ref), merges, and gzips the result.
 
-9. **SummarizeKing**: Joins the merged `.con.gz` against the query `.fam` to produce a per-sample TSV: each row is one query sample with a comma-separated list of matching reference IDs, or `MISSING` if none found.
+9. **SummarizeKing**: Joins the merged `.con.gz` against the query `.fam` to produce a per-sample TSV: each row is one query sample with a comma-separated list of matching reference IDs, or `MISSING` if none found. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
+
+10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries and SNP lists, adds a `DATASET` column, and concatenates them into `combined_summary.tsv`. Computes `global_summary.tsv` with one row per dataset: total query samples, number matched, percent matched, number of ambiguous matches (multiple ref hits), and SNP count used. Also stacks all per-dataset concordance PNGs vertically into `combined_concordance.png`.
 
 **Inputs:**
 
@@ -79,7 +84,11 @@ MakeRegionSnplists
 - `hq_snplists[]`: HQ-only SNP list before padding — inspect to tune QC thresholds
 - `duplicates_con[]`: Gzipped KING `.con` file with all cross-dataset duplicate pairs
 - `summary[]`: Per-sample TSV — one query sample per row, matched reference IDs or `MISSING`
+- `concordance_plots[]`: Per-dataset concordance diagnostic PNGs
 - `excluded_samples_query[]` / `excluded_samples_ref[]`: Het-outlier samples removed before KING
+- `combined_summary`: All per-dataset summaries concatenated with a `DATASET` column
+- `combined_plot`: All concordance PNGs stacked into a single image
+- `global_summary`: One row per dataset — TOTAL_QUERY, N_MATCHED, PCT_MATCHED, N_AMBIGUOUS, N_SNPS
 
 
 ## Annotation/QC
