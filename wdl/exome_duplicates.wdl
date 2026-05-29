@@ -5,289 +5,342 @@ workflow exome_duplicates {
     Array[Array[String]] vcf_pairs
     File   plink_bed
     String plink_prefix
-    File?  bim
-    Int    chunk_size   = 10000
-    Int    target_snps
+    Int    n_regions     = 100
+    File?  berisa_blocks
+    Int    target_snps   = 10000
+    Float  max_het_F     = 0.3
+    Int    chunk_size    = 10000
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
-  Array[File] plink_input_files = [plink_bed, plink_bim, sub(plink_bed, "\\.bed$", ".fam")]
+  File plink_fam = sub(plink_bed, "\\.bed$", ".fam")
 
-  scatter (pair in vcf_pairs) {
-    # pre-filter VCF to bim SNPs (parallel bcftools per chrom, streaming)
-    call SubsetVCF {
+  # Step 1: bin HM3 SNPs into N LD-block-merged regions
+  call MakeRegionSnplists {
+    input:
+      bim           = plink_bim,
+      n_regions     = n_regions,
+      berisa_blocks = berisa_blocks
+  }
+
+  # Step 2: extract each (VCF, region) combination in parallel
+  Int n_pairs    = length(vcf_pairs)
+  Int n_snplists = length(MakeRegionSnplists.snplists)
+  scatter (i in range(n_pairs * n_snplists)) {
+    Int pair_idx    = i / n_snplists
+    Int snplist_idx = i % n_snplists
+    call FilterVCF {
       input:
-        prefix      = pair[0],
-        input_vcf   = pair[1],
-        bim         = select_first([bim, plink_bim]),
+        prefix  = vcf_pairs[pair_idx][0],
+        vcf     = vcf_pairs[pair_idx][1],
+        snplist = MakeRegionSnplists.snplists[snplist_idx]
+    }
+  }
+
+  # Steps 3-6: per-VCF: concat -> subset query -> subset ref (parallel with FilterSNPs)
+  scatter (i in range(n_pairs)) {
+    Int first_chunk_idx = i * n_snplists
+    call ConcatVCF {
+      input:
+        prefix   = vcf_pairs[i][0],
+        all_vcfs = FilterVCF.filtered_vcf,
+        disk_gb  = ceil(size(FilterVCF.filtered_vcf[first_chunk_idx], "GB") * n_snplists * 2) + 20
+    }
+    # Subset VCF to all shared HM3 variants
+    call SubsetToPlink as SubsetQuery {
+      input:
+        input_files = [ConcatVCF.subset_vcf],
+        snp_list    = plink_bim,
+        out_prefix  = vcf_pairs[i][0] + "_query"
+    }
+    # Subset ref plink to same shared variants (uses query bim); runs parallel with FilterSNPs
+    call SubsetToPlink as SubsetRef {
+      input:
+        input_files = [plink_bed, plink_bim, plink_fam],
+        snp_list    = SubsetQuery.plink[1],
+        out_prefix  = vcf_pairs[i][0] + "_ref"
+    }
+    # QC-filter query plink and build snplist; runs parallel with SubsetRef
+    call FilterSNPs {
+      input:
+        plink_files = SubsetQuery.plink,
+        prefix      = vcf_pairs[i][0],
         target_snps = target_snps
     }
-
-    # subset plink to snplist and rename sample IDs with plink_prefix
-    call PlinkSubset {
+    call PrepareDataset as PrepQuery {
       input:
-        dataset_prefix = pair[0],
-        plink_prefix   = plink_prefix,
-        plink_files    = plink_input_files,
-        snplist        = SubsetVCF.snplist
+        input_plink = SubsetQuery.plink,
+        snp_list    = FilterSNPs.snplist,
+        prefix      = vcf_pairs[i][0],
+        max_het_F   = max_het_F,
+        chunk_size  = chunk_size
     }
-
-    # split ref VCF into indexed chunks (cached independently)
-    call SplitRefVCF {
+    call PrepareDataset as PrepRef {
       input:
-        ref_vcf    = PlinkSubset.ref_vcf,
-        ref_tbi    = PlinkSubset.ref_tbi,
-        chunk_size = chunk_size
+        input_plink = SubsetRef.plink,
+        snp_list    = FilterSNPs.snplist,
+        prefix      = plink_prefix,
+        max_het_F   = max_het_F,
+        chunk_size  = chunk_size
     }
-
-    # find cross-dataset duplicates by genotype concordance
-    call RunGtcheck {
+    call KingShards {
       input:
-        query_vcf       = SubsetVCF.filtered_vcf,
-        query_tbi       = SubsetVCF.filtered_vcf_tbi,
-        ref_vcfs        = SplitRefVCF.chunk_vcfs,
-        ref_tbis        = SplitRefVCF.chunk_tbis,
-        prefix          = pair[0] + "_gtcheck",
-        n_query_samples = SubsetVCF.n_query_samples,
-        n_ref_samples   = PlinkSubset.n_ref_samples
+        query_chunks = PrepQuery.chunks,
+        query_prefix = vcf_pairs[i][0],
+        ref_chunks   = PrepRef.chunks,
+        ref_prefix   = plink_prefix
     }
-
-    call SummarizeGtcheck {
+    call SummarizeKing {
       input:
-        gtcheck_raw = RunGtcheck.gtcheck_raw,
-        prefix      = pair[0] + "_gtcheck"
+        duplicates_con = KingShards.duplicates_con,
+        query_fam      = PrepQuery.plink[2],
+        query_prefix   = vcf_pairs[i][0],
+        ref_prefix     = plink_prefix
     }
   }
 
   output {
-    Array[File] gtcheck_raw     = RunGtcheck.gtcheck_raw
-    Array[File] gtcheck_summary = SummarizeGtcheck.gtcheck_summary
-    Array[File] gtcheck_plot    = SummarizeGtcheck.gtcheck_plot
+    Array[File]        subset_vcfs            = ConcatVCF.subset_vcf
+    Array[File]        subset_tbis            = ConcatVCF.subset_tbi
+    Array[File]        snplists               = FilterSNPs.snplist
+    Array[File]        hq_snplists            = FilterSNPs.hq_snplist
+    Array[File]        summary                = SummarizeKing.summary
+    Array[File]        duplicates_con         = KingShards.duplicates_con
+    Array[File]        excluded_samples_query = PrepQuery.excluded_samples
+    Array[File]        excluded_samples_ref   = PrepRef.excluded_samples
   }
 }
 
-task SubsetVCF {
-  input {
-    String prefix
-    File   input_vcf
-    File   bim
-    Int    target_snps
-    Int    cpu       = 24
-    Int    memory_gb = cpu
-  }
 
-  File   input_vcf_tbi = input_vcf + ".tbi"
-  String output_vcf    = prefix + ".subset.vcf.gz"
-  Int    disk_size     = ceil(size(input_vcf, 'GB') * 3)
+# -----------------------------------------------------------------------
+# Step 1: Bin HM3 SNPs into Berisa LD blocks, greedily merge to N regions
+# -----------------------------------------------------------------------
+task MakeRegionSnplists {
+  input {
+    File    bim
+    Int     n_regions     = 100
+    File?   berisa_blocks
+    String  berisa_url    = "https://bitbucket.org/nygcresearch/ldetect-data/raw/master/EUR/fourier_ls-all.bed"
+  }
 
   command <<<
   set -euo pipefail
-  VCF="~{input_vcf}"
-  INPUT_VCF_TBI="~{input_vcf_tbi}"
+
+  BLOCKS="~{if defined(berisa_blocks) then select_first([berisa_blocks]) else ""}"
+  BERISA_URL="~{berisa_url}"
   BIM="~{bim}"
-  OUTPUT_VCF="~{output_vcf}"
-  PREFIX="~{prefix}"
-  touch "$INPUT_VCF_TBI"
-  CHUNKS=$(( $(nproc) - 1 ))
-  if [[ $CHUNKS -lt 1 ]]; then CHUNKS=1; fi
+  N_REGIONS=~{n_regions}
 
-  # chromosomes present in the bim, normalised to chr-prefix
-  mkdir -p ./tmp
-  mapfile -t chromosomes < <(awk '{print $1}' "$BIM" | sort -u | awk '{print (/^chr/ ? $0 : "chr"$0)}')
-
-  N_BEFORE=$(bcftools index -s "$VCF" | awk '{sum+=$3} END {print sum}')
-  echo "Variants before filter: $N_BEFORE"
-  echo "Processing ${#chromosomes[@]} chromosomes in parallel ($CHUNKS jobs)..."
-  echo ""
-
-  for chrom in "${chromosomes[@]}"; do
-    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
-    awk -v c="$chrom" '$1 == c || "chr"$1 == c {print c"\t"$4}' "$BIM" > "./tmp/pos_${safe_chrom}.txt"
-  done
-
-  # build sample rename map: OLD_NAME -> PREFIX_OLD_NAME
-  bcftools query -l "$VCF" | awk -v p="$PREFIX" '{print $0"\t"p"_"$0}' > sample_rename.txt
-
-  SCRIPT_DIR=$(mktemp -d)
-  for chrom in "${chromosomes[@]}"; do
-    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
-    cat > "${SCRIPT_DIR}/run_${safe_chrom}.sh" << SCRIPT
-#!/bin/bash
-bcftools view -r "${chrom}" -T "./tmp/pos_${safe_chrom}.txt" "${VCF}" | bcftools reheader -s ./sample_rename.txt | bgzip -c > "chunk_${safe_chrom}.vcf.gz"
-echo "Done: ${chrom}"
-SCRIPT
-  done
-
-  ls "${SCRIPT_DIR}"/run_*.sh | parallel -j "$CHUNKS" 'bash {}'
-
-  for chrom in "${chromosomes[@]}"; do
-    safe_chrom=$(echo "$chrom" | sed 's/[*:\/]/_/g')
-    echo "chunk_${safe_chrom}.vcf.gz"
-  done > chunk_list.txt
-
-  bcftools concat -n -Oz -o "$OUTPUT_VCF" -f chunk_list.txt
-  rm -f chunk_*.vcf.gz chunk_list.txt
-
-  bcftools index -t "$OUTPUT_VCF"
-  N_AFTER=$(bcftools index -s "$OUTPUT_VCF" | awk '{sum+=$3} END {print sum}')
-  echo "Variants after filter: $N_AFTER"
-
-  bcftools query -f '%ID\n' "$OUTPUT_VCF" > "${PREFIX}.snplist.txt"
-  TARGET_SNPS=~{target_snps}
-
-  # intersect VCF IDs with BIM IDs to ensure ID consistency after position-based filtering
-  awk '{print $2}' "$BIM" > bim_ids.txt
-  comm -12 <(sort "${PREFIX}.snplist.txt") <(sort bim_ids.txt) > "${PREFIX}.snplist.intersect.txt"
-  N_INTERSECT=$(wc -l < "${PREFIX}.snplist.intersect.txt")
-  echo "Variants in BIM ID intersection: $N_INTERSECT"
-
-  if [[ $N_INTERSECT -gt $TARGET_SNPS ]]; then
-    shuf -n "$TARGET_SNPS" "${PREFIX}.snplist.intersect.txt" | sort -V > "${PREFIX}.snplist.txt"
+  if [[ -n "$BLOCKS" ]]; then
+      cp "$BLOCKS" blocks.bed
   else
-    sort -V "${PREFIX}.snplist.intersect.txt" > "${PREFIX}.snplist.txt"
+      curl -fsSL "$BERISA_URL" -o blocks.bed
   fi
 
-  bcftools view -i "ID=@${PREFIX}.snplist.txt" -Oz -o "${PREFIX}.subset2.vcf.gz" "$OUTPUT_VCF"
-  mv "${PREFIX}.subset2.vcf.gz" "$OUTPUT_VCF"
-  bcftools index -t "$OUTPUT_VCF"
-  echo "SNPs after intersection+subsample: $(wc -l < "${PREFIX}.snplist.txt")"
-  bcftools query -l "$OUTPUT_VCF" | wc -l > n_query_samples.txt
+  N_HM3=$(wc -l < "$BIM")
+  N_BLOCKS=$(awk 'NR>1' blocks.bed | wc -l)
+  echo "HM3 variants: $N_HM3  |  Berisa blocks: $N_BLOCKS  |  Target regions: ${N_REGIONS}"
+
+  awk '
+  NR==FNR {
+      if (NR==1) next
+      chr=$1; gsub(/^chr/,"",chr); start=$2+0; end=$3+0; idx=NR-2
+      n = ++n_per_chr[chr]
+      blk_start[chr,n]=start; blk_end[chr,n]=end; blk_idx[chr,n]=idx
+      next
+  }
+  {
+      chr=$1; gsub(/^chr/,"",chr); snp=$2; pos=$4+0
+      n = n_per_chr[chr]
+      if (!n) next
+      lo=1; hi=n
+      while (lo<=hi) {
+          mid=int((lo+hi)/2)
+          if      (blk_end[chr,mid]   < pos) lo=mid+1
+          else if (blk_start[chr,mid] > pos) hi=mid-1
+          else { print blk_idx[chr,mid], chr, pos, snp; break }
+      }
+  }
+  ' blocks.bed "$BIM" | sort -k1,1n > assignments.txt
+
+  N_ASSIGNED=$(wc -l < assignments.txt)
+  echo "SNPs assigned: $N_ASSIGNED / $N_HM3"
+
+  awk -v n_target="$N_REGIONS" -v total="$N_ASSIGNED" '
+  BEGIN { regions_left=n_target; snps_left=total; target=int(total/n_target); region=0; cur=0; prev_block=-1 }
+  {
+      block=$1+0; chr=$2; pos=$3; snp=$4
+      if (block != prev_block && cur >= target && region < n_target-1) {
+          region++; snps_left -= cur; regions_left--
+          target=int(snps_left/regions_left); cur=0
+      }
+      prev_block=block
+      print chr "\t" pos "\t" snp >> (sprintf("snplist_%04d.txt", region))
+      cur++
+  }
+  ' assignments.txt
+
+  echo "Regions created: $(ls snplist_*.txt | wc -l)"
   >>>
 
   output {
-    File filtered_vcf     = output_vcf
-    File filtered_vcf_tbi = output_vcf + ".tbi"
-    File snplist          = prefix + ".snplist.txt"
-    Int  n_query_samples  = read_int("n_query_samples.txt")
-  }
-
-  runtime {
-    memory: "~{memory_gb} GB"
-    disks: "local-disk ~{disk_size} HDD"
-    cpu: cpu
+    Array[File] snplists = glob("snplist_*.txt")
   }
 }
 
-task PlinkSubset {
+
+# -----------------------------------------------------------------------
+# Step 2: Extract one region from a VCF using bcftools -R / -T
+# -----------------------------------------------------------------------
+task FilterVCF {
   input {
-    String      dataset_prefix
-    String      plink_prefix
-    Array[File] plink_files
-    File        snplist
-    Int         cpu       = 4
-    Int         memory_gb = 16
+    String vcf
+    String prefix
+    File   snplist
+    Int    cpu       = 4
+    Int    disk_gb   = 20
   }
 
-  File   plink_bed  = plink_files[0]
-  Int    disk_size  = ceil(size(plink_bed, 'GB') * 3) + 10
-  String out_prefix = dataset_prefix + "_" + plink_prefix
+  String snplist_id = basename(snplist, ".txt")
+  String out_vcf    = prefix + "_" + snplist_id + ".vcf.gz"
 
   command <<<
   set -euo pipefail
-  PLINK_PREFIX="~{sub(plink_bed, '\\.bed$', '')}"
+
   SNPLIST="~{snplist}"
-  RENAME_PREFIX="~{plink_prefix}"
-  OUT_PREFIX="~{out_prefix}"
+  OUT_VCF="~{out_vcf}"
+  VCF="~{vcf}"
   CPU=~{cpu}
 
-  echo "Ref:      $PLINK_PREFIX"
-  echo "Variants: $(wc -l < "$SNPLIST") SNPs"
-  echo ""
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
 
-  # build renamed fam before extract: old_FID old_IID new_FID new_IID
-  awk -v p="$RENAME_PREFIX" 'BEGIN{OFS="\t"} {print $1,$2,$1,p"_"$2}' "$PLINK_PREFIX.fam" > update_ids.txt
-  plink2 \
-    --bfile "$PLINK_PREFIX" \
-    --update-ids update_ids.txt \
-    --make-just-fam \
-    --out renamed_tmp \
-    --threads $CPU
+  awk '{ print "chr" $1 "\t" $2 }' "$SNPLIST" | sort -k1,1V -k2,2n > positions.txt
 
-  plink2 \
-    --bfile "$PLINK_PREFIX" \
-    --fam renamed_tmp.fam \
-    --extract "$SNPLIST" \
-    --make-bed \
-    --out "$OUT_PREFIX" \
-    --threads $CPU
+  awk '$1 != prev { if (prev) print prev "\t" (lo-1) "\t" hi; prev=$1; lo=$2; hi=$2 }
+       { if ($2<lo) lo=$2; if ($2>hi) hi=$2 }
+       END { if (prev) print prev "\t" (lo-1) "\t" hi }' positions.txt > regions.bed
 
-  plink2 \
-    --bfile "$OUT_PREFIX" \
-    --export vcf id-paste=iid bgz \
-    --output-chr chrM \
-    --out "$OUT_PREFIX" \
-    --threads $CPU
-  bcftools index -t "${OUT_PREFIX}.vcf.gz"
+  bcftools view \
+      --regions-file  regions.bed \
+      --targets-file  positions.txt \
+      --output-type z \
+      --output        "$OUT_VCF" \
+      --threads       "$CPU" \
+      "$VCF"
 
-  echo "Done."
-  echo "  Variants: $(wc -l < "${OUT_PREFIX}.bim")"
-  bcftools query -l "${OUT_PREFIX}.vcf.gz" | wc -l > n_ref_samples.txt
-  echo "  Samples:  $(cat n_ref_samples.txt)"
   >>>
 
   output {
-    Array[File] plink_out    = ["~{out_prefix}.bed", "~{out_prefix}.bim", "~{out_prefix}.fam"]
-    File        ref_vcf      = out_prefix + ".vcf.gz"
-    File        ref_tbi      = out_prefix + ".vcf.gz.tbi"
-    Int         n_ref_samples = read_int("n_ref_samples.txt")
+    File filtered_vcf = out_vcf
   }
 
   runtime {
-    memory: "~{memory_gb} GB"
-    disks:  "local-disk ~{disk_size} HDD"
+    disks:  "local-disk ~{disk_gb} HDD"
     cpu:    cpu
   }
 }
 
-task SplitRefVCF {
+
+# -----------------------------------------------------------------------
+# Step 3: Concatenate region chunks for one prefix, streaming from GCS
+# -----------------------------------------------------------------------
+task ConcatVCF {
   input {
-    File   ref_vcf
-    File   ref_tbi
-    Int    chunk_size
-    Int    cpu        = 8
-    Int    memory_gb  = cpu*2
+    String        prefix
+    Array[String] all_vcfs   # coerced from Array[File], not localized
+    Int           disk_gb
+    Int           cpu       = 4
+    Int           memory_gb = 8
   }
 
-  Int disk_size = ceil(size(ref_vcf, 'GB') * 2) + 10
+  String out_vcf = prefix + "_subset.vcf.gz"
 
   command <<<
   set -euo pipefail
-  REF_VCF="~{ref_vcf}"
-  REF_TBI="~{ref_tbi}"
-  CHUNK_SIZE=~{chunk_size}
-  touch "$REF_TBI"
 
-  N_SAMPLES=$(bcftools query -l "$REF_VCF" | wc -l)
-  N_CHUNKS=$(( (N_SAMPLES + CHUNK_SIZE - 1) / CHUNK_SIZE ))
-  echo "Splitting $N_SAMPLES samples into $N_CHUNKS chunks of up to $CHUNK_SIZE..."
+  PREFIX="~{prefix}"
+  VCF_LIST_FILE="~{write_lines(all_vcfs)}"
+  OUT_VCF="~{out_vcf}"
+  CPU=~{cpu}
 
-  bcftools query -l "$REF_VCF" | split -d -l $CHUNK_SIZE - "samples_chunk_"
-  mapfile -t slist_files < <(ls samples_chunk_*)
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
 
-  INPUT_SIZE=$(stat -c%s "$REF_VCF")
-  (
-    while true; do
-      sleep 10
-      DONE=$(stat -c%s samples_chunk_*.bcf 2>/dev/null | awk '{s+=$1} END {print s+0}')
-      PCT=$(( INPUT_SIZE > 0 ? DONE * 100 / INPUT_SIZE : 0 ))
-      echo "  written: $(( DONE / 1024 / 1024 )) / $(( INPUT_SIZE / 1024 / 1024 )) MB  (${PCT}%)"
-    done
-  ) &
-  PROGRESS_PID=$!
+  grep -F "${PREFIX}_snplist_" "$VCF_LIST_FILE" \
+      | awk -F'snplist_' '{split($2,a,"."); print a[1]+0, $0}' \
+      | sort -k1,1n \
+      | awk '{print $2}' > vcf_list.txt
 
-  for chunk in samples_chunk_*; do
-    echo "bcftools view -S ${chunk} -Ob --write-index -o ${chunk}.bcf ${REF_VCF}"
-  done | parallel -j "$(nproc)"
+  bcftools concat \
+      --file-list vcf_list.txt \
+      --output-type z \
+      --output    "$OUT_VCF" \
+      --threads   "$CPU"
 
-  kill $PROGRESS_PID 2>/dev/null
-  wait $PROGRESS_PID 2>/dev/null || true
-  rm -f "${slist_files[@]}"
-  echo "Done: $N_CHUNKS BCF chunks created."
+  bcftools index -t --threads "$CPU" "$OUT_VCF"
+  echo "Total variants: $(bcftools index -n "$OUT_VCF")"
   >>>
 
   output {
-    Array[File] chunk_vcfs = glob("samples_chunk_*.bcf")
-    Array[File] chunk_tbis = glob("samples_chunk_*.bcf.csi")
+    File subset_vcf = out_vcf
+    File subset_tbi = out_vcf + ".tbi"
+  }
+
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+    cpu:    cpu
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# Step 4/6: Subset VCF or plink to a SNP list, return plink trio
+# -----------------------------------------------------------------------
+task SubsetToPlink {
+  input {
+    Array[File] input_files  # [vcf.gz] or [bed, bim, fam]
+    File        snp_list
+    String      out_prefix
+    Int         cpu       = 16
+  }
+
+  Int disk_size = ceil(size(input_files[0], 'GB') * 3) + 20
+  Int memory_gb = 16
+
+  command <<<
+  set -euo pipefail
+
+  SNP_LIST="~{snp_list}"
+  INPUT_FILE0="~{input_files[0]}"
+  OUT_PREFIX="~{out_prefix}"
+  CPU=~{cpu}
+  TOTAL_MEM_MB=12288
+
+  # normalise snp_list: bim files have 6 columns, extract col 2; plain ID files pass through
+  awk 'NF > 1 {print $2} NF == 1 {print $1}' "$SNP_LIST" > _extract.txt
+
+  if [[ "$INPUT_FILE0" == *.vcf.gz ]]; then
+    INPUT_FLAG="--vcf $INPUT_FILE0 --double-id"
+  else
+    INPUT_FLAG="--bfile ${INPUT_FILE0%.bed}"
+  fi
+
+  plink2 \
+    $INPUT_FLAG \
+    --chr 1-22 \
+    --extract _extract.txt \
+    --rm-dup exclude-all \
+    --make-bed \
+    --out     "$OUT_PREFIX" \
+    --threads "$CPU" \
+    --memory  "$TOTAL_MEM_MB"
+
+  echo "Variants: $(wc -l < "${OUT_PREFIX}.bim")"
+  echo "Samples:  $(wc -l < "${OUT_PREFIX}.fam")"
+  >>>
+
+  output {
+    Array[File] plink = [out_prefix + ".bed", out_prefix + ".bim", out_prefix + ".fam"]
   }
 
   runtime {
@@ -297,175 +350,285 @@ task SplitRefVCF {
   }
 }
 
-task RunGtcheck {
+
+# -----------------------------------------------------------------------
+# Step 5: Select high-quality SNPs; pad with random SNPs to target count
+# -----------------------------------------------------------------------
+task FilterSNPs {
   input {
-    File        query_vcf
-    File        query_tbi
-    Array[File] ref_vcfs
-    Array[File] ref_tbis
+    Array[File] plink_files        # [bed, bim, fam] from SubsetToPlink
     String      prefix
-    Int         n_query_samples
-    Int         n_ref_samples
+    Int         target_snps
+    Float       max_geno   = 0.05
+    Float       hwe_p      = 0.0001
+    Float       min_maf    = 0.01
+    Int         cpu        = 4
+    Int         memory_gb  = 8
+    Int         disk_gb    = 20
+  }
+
+  command <<<
+  set -euo pipefail
+
+  BED="~{plink_files[0]}"
+  OUT_PREFIX="~{prefix}"
+  MAX_GENO=~{max_geno}
+  HWE_P=~{hwe_p}
+  MIN_MAF=~{min_maf}
+  TARGET_SNPS=~{target_snps}
+
+  PREFIX="${BED%.bed}"
+
+  # Strict QC filter -> high-quality SNP list
+  plink2 \
+      --bfile      "$PREFIX" \
+      --geno       "$MAX_GENO" \
+      --hwe        "$HWE_P" \
+      --maf        "$MIN_MAF" \
+      --write-snplist \
+      --no-psam-pheno \
+      --out        hq
+
+  N_HQ=$(wc -l < hq.snplist)
+  N_TOTAL=$(wc -l < "${PREFIX}.bim")
+  echo "Total variants in plink:    $N_TOTAL"
+  echo "High-quality SNPs after QC: $N_HQ  (geno<=${MAX_GENO}, HWE>${HWE_P}, MAF>=${MIN_MAF})"
+  echo "Target SNP count:           ${TARGET_SNPS}"
+
+  cp hq.snplist "${OUT_PREFIX}_hq_snplist.txt"
+
+  # Append shuffled non-HQ variants below HQ, then take top target_snps
+  awk '{print $2}' "${PREFIX}.bim" | sort > all_snps.txt
+  sort hq.snplist | comm -23 all_snps.txt - | shuf >> hq.snplist
+  head -n "$TARGET_SNPS" hq.snplist | sort -V > "${OUT_PREFIX}_snplist.txt"
+
+  echo "Final SNP count: $(wc -l < "${OUT_PREFIX}_snplist.txt")"
+  >>>
+
+  output {
+    File snplist    = "~{prefix}_snplist.txt"
+    File hq_snplist = "~{prefix}_hq_snplist.txt"
+  }
+
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+    cpu:    cpu
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# Steps 4+5: Subset to target SNPs, filter high-F samples, tag IDs, chunk
+# -----------------------------------------------------------------------
+task PrepareDataset {
+  input {
+    Array[File] input_plink
+    File        snp_list
+    String      prefix
+    Float       max_het_F  = 0.3
+    Int         chunk_size = 10000
+    Int         cpu        = 16
+    Int         memory_gb  = 8
+  }
+
+  String out_prefix = prefix + "_prepped"
+  Int    disk_size  = ceil(size(input_plink[0], 'GB') * 4) + 20
+
+  command <<<
+  set -euo pipefail
+
+  BED="~{input_plink[0]}"
+  SNP_LIST="~{snp_list}"
+  OUT_PREFIX="~{out_prefix}"
+  PREFIX="~{prefix}"
+  MAX_HET_F=~{max_het_F}
+  CHUNK_SIZE=~{chunk_size}
+  CPU=~{cpu}
+
+  PLINK_PREFIX="${BED%.bed}"
+
+  # 1. subset to target SNPs
+  plink2 \
+    --bfile   "$PLINK_PREFIX" \
+    --extract "$SNP_LIST" \
+    --make-bed \
+    --out     subsetted \
+    --threads "$CPU"
+
+  # 2. het filter
+  plink2 --bfile subsetted --freq --out subsetted --threads "$CPU"
+  plink2 --bfile subsetted --read-freq subsetted.afreq --het --out subsetted --threads "$CPU"
+
+  awk -v f="$MAX_HET_F" 'NR > 1 && $6 > f {print $1, $2}' subsetted.het > high_F_samples.txt
+  echo "High-F samples excluded: $(wc -l < high_F_samples.txt)"
+
+  awk -v f="$MAX_HET_F" 'NR == 1 || (NR > 1 && $6 > f)' subsetted.het > het_outliers.tsv
+
+  plink2 \
+    --bfile   subsetted \
+    --remove  high_F_samples.txt \
+    --make-bed \
+    --out     "$OUT_PREFIX" \
+    --threads "$CPU"
+
+  # 3. annotate sample IDs
+  awk -v p="${PREFIX}_" '{$2 = p $2; print}' "${OUT_PREFIX}.fam" > tmp.fam
+  mv tmp.fam "${OUT_PREFIX}.fam"
+
+  echo "Final samples:  $(wc -l < "${OUT_PREFIX}.fam")"
+  echo "Final variants: $(wc -l < "${OUT_PREFIX}.bim")"
+
+  # 4. split into sample chunks
+  awk '{print $1, $2}' "${OUT_PREFIX}.fam" \
+    | split -d -l "$CHUNK_SIZE" - "${OUT_PREFIX}_shard_"
+
+  for shard in "${OUT_PREFIX}_shard_"*; do
+    idx="${shard##*_shard_}"
+    plink2 \
+      --bfile   "$OUT_PREFIX" \
+      --keep    "$shard" \
+      --make-bed \
+      --out     "${OUT_PREFIX}_chunk${idx}" \
+      --threads "$CPU" \
+      --silent
+  done
+
+  echo "Created $(ls "${OUT_PREFIX}_chunk"*.bed | wc -l) chunks of up to ${CHUNK_SIZE} samples"
+  >>>
+
+  output {
+    Array[File] plink            = [out_prefix + ".bed", out_prefix + ".bim", out_prefix + ".fam"]
+    File        excluded_samples = "het_outliers.tsv"
+    Array[File] chunks           = glob(out_prefix + "_chunk*")
+  }
+
+  runtime {
+    memory: "~{memory_gb} GB"
+    disks:  "local-disk ~{disk_size} HDD"
+    cpu:    cpu
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# KING --duplicate across all N×M chunk pairs, sequential
+# -----------------------------------------------------------------------
+task KingShards {
+  input {
+    Array[File] query_chunks
+    String      query_prefix
+    Array[File] ref_chunks
+    String      ref_prefix
     Int         cpu = 32
   }
 
-  Int effective_cpu     = if length(ref_vcfs) < cpu then length(ref_vcfs) else cpu
-  Int memory_gb         = ceil(effective_cpu/2.0)
-  Int gtcheck_output_gb = ceil(n_query_samples * n_ref_samples / 15000000.0)
-  Int disk_size         = ceil(size(query_vcf, 'GB') + size(ref_vcfs[0], 'GB') * length(ref_vcfs)) + gtcheck_output_gb + 20
+  Int mem_raw   = ceil((size(query_chunks[0], 'GB') + size(ref_chunks[0], 'GB')) * 20)
+  Int memory_gb = if mem_raw < 16 then 16 else mem_raw
+  String out_prefix = query_prefix + "_vs_" + ref_prefix
+  Int    disk_size  = ceil((size(query_chunks, 'GB') + size(ref_chunks, 'GB')) * 2) + 20
 
   command <<<
   set -euo pipefail
-  QUERY_VCF="~{query_vcf}"
-  QUERY_TBI="~{query_tbi}"
-  PREFIX="~{prefix}"
-  REF_VCFS_LIST="~{write_lines(ref_vcfs)}"
-  REF_TBIS_LIST="~{write_lines(ref_tbis)}"
-  touch "$QUERY_TBI"
 
-  echo "Query: $QUERY_VCF ($(bcftools query -l "$QUERY_VCF" | wc -l) samples)"
-  echo "Chunks: $(wc -l < "$REF_VCFS_LIST") VCF chunks"
-  echo ""
+  QRY_PFX="~{query_prefix}_"
+  QUERY_CHUNKS_FILE="~{write_lines(query_chunks)}"
+  REF_CHUNKS_FILE="~{write_lines(ref_chunks)}"
+  OUT_PREFIX="~{out_prefix}"
 
-  PIPELINE_SH="${PREFIX}_pipeline.sh"
-  paste "$REF_VCFS_LIST" "$REF_TBIS_LIST" | while IFS=$'\t' read -r vcf tbi; do
-    mv "$tbi" "${vcf}.csi"
-    name=$(basename "$vcf" .bcf)
-    echo "bcftools gtcheck --no-HWE-prob -g ${vcf} ${QUERY_VCF} | gzip > chunk_${name}.gtcheck.gz"
-  done > "$PIPELINE_SH"
-  export TMPDIR=$(pwd)
-  parallel -j "$(nproc)" < "$PIPELINE_SH"
+  grep '\.bed$' "$QUERY_CHUNKS_FILE" | sed 's/\.bed$//' > query_bases.txt
+  grep '\.bed$' "$REF_CHUNKS_FILE"   | sed 's/\.bed$//' > ref_bases.txt
 
-  cat chunk_*.gtcheck.gz > "${PREFIX}.gtcheck.gz"
-  rm -f chunk_*.gtcheck.gz "$PIPELINE_SH"
+  echo "Query chunks: $(wc -l < query_bases.txt)"
+  echo "Ref chunks:   $(wc -l < ref_bases.txt)"
 
-  echo "Done. $(zcat "${PREFIX}.gtcheck.gz" | awk '/^DCv2/' | wc -l) pairwise comparisons written."
+  awk 'NR==FNR {a[$0]; next} {for (i in a) print i "," $0}' query_bases.txt ref_bases.txt > pairs.csv
+
+  TOTAL_PAIRS=$(wc -l < pairs.csv)
+  echo "Total chunk pairs: $TOTAL_PAIRS"
+
+  JOB=0
+  while IFS=',' read -r qbase rbase; do
+    JOB=$((JOB + 1))
+    echo "[$JOB/$TOTAL_PAIRS] $(basename "$qbase") vs $(basename "$rbase")"
+    pfx="$(basename "$qbase")_vs_$(basename "$rbase")"
+    king -b "${qbase}.bed,${rbase}.bed" --duplicate --cpu "$(nproc)" --prefix "$pfx"
+
+    con="${pfx}.con"
+    [[ ! -f "$con" ]] && continue
+
+    awk -v qp="$QRY_PFX" -v hdr="$([ ! -f merged.con ] && echo 1 || echo 0)" '
+      NR==1 { if (hdr) print; next }
+      { if (($2 ~ "^"qp) != ($4 ~ "^"qp)) print }
+    ' "$con" >> merged.con
+  done < pairs.csv
+
+  gzip -c merged.con > "${OUT_PREFIX}.con.gz"
+  echo "Done. $(zcat "${OUT_PREFIX}.con.gz" | tail -n +2 | wc -l) duplicate pairs found."
   >>>
 
   output {
-    File gtcheck_raw = prefix + ".gtcheck.gz"
+    File duplicates_con = out_prefix + ".con.gz"
   }
 
   runtime {
     memory: "~{memory_gb} GB"
     disks:  "local-disk ~{disk_size} HDD"
-    cpu:    effective_cpu
+    cpu:    cpu
   }
 }
 
-task SummarizeGtcheck {
+
+# -----------------------------------------------------------------------
+# Build per-sample summary from merged .con.gz
+# -----------------------------------------------------------------------
+task SummarizeKing {
   input {
-    File   gtcheck_raw
-    String prefix
+    File   duplicates_con
+    File   query_fam
+    String query_prefix
+    String ref_prefix
   }
 
-  Int disk_size = ceil(size(gtcheck_raw, 'GB') * 2) + 10
+  Int    disk_size  = ceil(size(duplicates_con, 'GB') * 2) + 10
+  String out_prefix = query_prefix + "_vs_" + ref_prefix
+
   command <<<
   set -euo pipefail
-  GTCHECK_RAW="~{gtcheck_raw}"
-  PREFIX="~{prefix}"
 
-  python3 - "$GTCHECK_RAW" "${PREFIX}.summary.tsv" "${PREFIX}.distribution.png" "$PREFIX" << 'PYEOF'
-import sys, math, gzip, matplotlib
-matplotlib.use('Agg')
-import matplotlib.pyplot as plt
-import numpy as np
-from scipy.stats import gaussian_kde
+  QRY_PFX="~{query_prefix}_"
+  OUT_PREFIX="~{out_prefix}"
+  DUPLICATES_CON="~{duplicates_con}"
+  QUERY_FAM="~{query_fam}"
+  SUMMARY="${OUT_PREFIX}.summary.tsv"
 
-gtcheck_file, summary_file, out_png, prefix = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+  zcat "$DUPLICATES_CON" | awk -v qp="$QRY_PFX" '
+    NR==1 { next }
+    {
+      if      ($2 ~ "^"qp) { qid=$1; rid=$3 }
+      else if ($4 ~ "^"qp) { qid=$3; rid=$1 }
+      else next
+      m[qid] = (qid in m) ? m[qid] "," rid : rid
+    }
+    END { for (q in m) print q "\t" m[q] }
+  ' > _matches.txt
 
-stats = {}
-opener = gzip.open if gtcheck_file.endswith('.gz') else open
-with opener(gtcheck_file, 'rt') as f:
-    for line in f:
-        if not line.startswith('DCv2'):
-            continue
-        parts = line.rstrip('\n').split('\t')
-        query, ref = parts[1], parts[2]
-        nsites = int(parts[5])
-        rate = float(parts[3]) / nsites if nsites > 0 else 1.0
-        if query not in stats:
-            near = [(rate, ref)] if rate < 0.02 else []
-            stats[query] = {'best': (rate, ref), 'second': None, 'sum': rate, 'count': 1, 'near': near}
-        else:
-            s = stats[query]
-            s['sum'] += rate
-            s['count'] += 1
-            if rate < s['best'][0]:
-                s['second'] = s['best']
-                s['best'] = (rate, ref)
-            elif s['second'] is None or rate < s['second'][0]:
-                s['second'] = (rate, ref)
-            if rate < 0.02:
-                s['near'].append((rate, ref))
+  printf "QUERY\tDUPLICATES\n" > "$SUMMARY"
+  awk '
+    NR==FNR { m[$1]=$2; next }
+    { print $1 "\t" ($1 in m ? m[$1] : "MISSING") }
+  ' _matches.txt "$QUERY_FAM" >> "$SUMMARY"
 
-rows = []
-for query, s in stats.items():
-    best_rate, best_ref = s['best']
-    second_rate, second_ref = s['second'] if s['second'] else (float('nan'), 'N/A')
-    avg_others = (s['sum'] - best_rate) / (s['count'] - 1) if s['count'] > 1 else float('nan')
-    ratio = best_rate / avg_others if avg_others > 0 else float('nan')
-    note_map = {ref: r for r, ref in s['near'] if ref != best_ref}
-    if (second_ref != 'N/A' and second_ref not in note_map
-            and not math.isnan(avg_others) and avg_others > 0
-            and second_rate / avg_others < 0.1):
-        note_map[second_ref] = second_rate
-    near_others = sorted(note_map.items(), key=lambda x: x[1])
-    notes = ('{' + ','.join(f'{ref}:{r:.4f}' for ref, r in near_others) + '}') if near_others else ''
-    rows.append((best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio, notes))
-rows.sort()
-
-with open(summary_file, 'w') as out:
-    out.write('\t'.join(['QUERY','BEST_MATCH','BEST_RATE','2ND_MATCH','2ND_RATE','AVG_OTHERS','RATIO','NOTES']) + '\n')
-    for best_rate, query, best_ref, second_ref, second_rate, avg_others, ratio, notes in rows:
-        out.write(f'{query}\t{best_ref}\t{best_rate:.6f}\t{second_ref}\t{second_rate:.6f}\t{avg_others:.6f}\t{ratio:.6f}\t{notes}\n')
-
-print(f"Summary: {summary_file}  ({len(rows)} queries, "
-      f"{sum(1 for r in rows if not math.isnan(r[6]) and r[6] < 0.1)} likely duplicates)")
-
-best_rates   = [r[0] for r in rows]
-second_rates = [r[4] for r in rows if not math.isnan(r[4])]
-avg_rates    = [r[5] for r in rows if not math.isnan(r[5])]
-# r[6]=ratio, r[7]=notes
-
-def kde_xy(data, n=500):
-    if len(data) < 2:
-        return None, None
-    kde = gaussian_kde(data)
-    xs = np.linspace(min(data), max(data), n)
-    return xs, kde(xs)
-
-fig, ax = plt.subplots(figsize=(10, 5))
-layers = [
-    (avg_rates,    'Avg others',     '#b0b0b0', 1.2, 0.40, '--', 1),
-    (second_rates, '2nd best match', '#f5a42a', 2.0, 0.65, '-',  2),
-    (best_rates,   'Best match',     '#1a6db5', 2.8, 1.00, '-',  3),
-]
-for data, label, color, lw, alpha, ls, zorder in layers:
-    xs, ys = kde_xy(data)
-    if xs is None:
-        continue
-    ax.plot(xs, ys, color=color, linewidth=lw, alpha=alpha,
-            label=label, linestyle=ls, zorder=zorder)
-    ax.fill_between(xs, ys, alpha=alpha * 0.25, color=color, zorder=zorder)
-
-ax.set_xlabel('Discordance rate')
-ax.set_ylabel('Density')
-ax.set_title(f'Gtcheck discordance rate distributions\n{prefix}', fontsize=11)
-ax.legend()
-plt.tight_layout()
-plt.savefig(out_png, dpi=150)
-print(f"Plot:    {out_png}")
-PYEOF
+  FOUND=$(awk 'NR>1 && $2!="MISSING"' "$SUMMARY" | wc -l)
+  TOTAL=$(awk 'NR>1' "$SUMMARY" | wc -l)
+  echo "$FOUND/$TOTAL query samples have duplicates in ref"
   >>>
 
   output {
-    File gtcheck_summary = prefix + ".summary.tsv"
-    File gtcheck_plot    = prefix + ".distribution.png"
+    File summary = out_prefix + ".summary.tsv"
   }
 
   runtime {
-    disks:  "local-disk ~{disk_size} HDD"
+    disks: "local-disk ~{disk_size} HDD"
   }
-
 }

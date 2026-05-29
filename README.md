@@ -50,6 +50,85 @@ Each row in the summary TSV is one query (exome) sample. `BEST_MATCH` is the mos
 scripts/test_gtcheck.sh <query.vcf.gz> <plink_prefix> [output_prefix] [--parallel N]
 ```
 
+---
+
+### exome_duplicates.wdl
+
+KING-based duplicate detection between exome VCFs and the FinnGen plink reference. Preferred over gtcheck when sample counts are large — KING scales better and gives a cleaner kinship coefficient rather than a discordance rate.
+
+**How the workflow works:**
+
+```
+MakeRegionSnplists
+      │
+      └─ FilterVCF ×(n_vcfs × n_regions)   [parallel scatter]
+             │
+       ConcatVCF                            [per VCF]
+             │
+       SubsetQuery (VCF → plink, shared HM3 variants)
+             │
+        ┌────┴────────────────┐
+   SubsetRef              FilterSNPs
+   (ref plink →           (QC filter query plink,
+    shared variants)       build final SNP list)
+        │                      │
+        └────────┬─────────────┘
+            PrepQuery / PrepRef
+            (subset to QC snplist, het-filter,
+             tag IDs, split into chunks)
+                   │
+              KingShards
+              (KING --duplicate, all chunk pairs)
+                   │
+            SummarizeKing
+            (per-sample duplicate summary)
+```
+
+**Step-by-step:**
+
+1. **MakeRegionSnplists**: Downloads Berisa LD blocks (or takes a user-supplied file), assigns HM3 SNPs to blocks, and greedily merges blocks into `n_regions` roughly equal-sized regions. Outputs one SNP list per region (zero-padded filenames so glob order is numeric).
+
+2. **FilterVCF** *(scatter over all VCF × region combinations)*: For each region, runs `bcftools view -R/-T` against the remote GCS VCF using a tabix pre-filter for speed. Outputs one small `vcf.gz` per shard.
+
+3. **ConcatVCF** *(per VCF)*: Sorts the shard VCFs by region index (extracted from filename, not shard order), concatenates with `bcftools concat`, and indexes the result. The `.tbi` is a declared output so it is cached and available for downstream tasks.
+
+4. **SubsetQuery**: Converts the concatenated VCF to plink1 binary (`--make-bed`) extracting only variants present in the HM3 bim. Handles VCF input by detecting the `.vcf.gz` extension — no `input_type` flag needed.
+
+5. **SubsetRef** *(runs in parallel with FilterSNPs)*: Subsets the reference plink to the same shared variants, using the query bim as the SNP list (the task normalises bim → ID column automatically).
+
+6. **FilterSNPs** *(runs in parallel with SubsetRef)*: Applies QC filters to the query plink (`--geno`, `--hwe`, `--maf`). High-quality variants go to the top of the list; the remaining variants are shuffled and appended below. `head -n target_snps | sort -V` then takes the top N sorted by genomic position. Outputs both the final SNP list and the HQ-only list for parameter inspection.
+
+7. **PrepQuery / PrepRef**: Subsets each plink dataset to the final SNP list, removes samples with inbreeding coefficient F > `max_het_F`, annotates sample IDs with the dataset prefix (`PREFIX_SAMPLEID`), and splits into chunks of `chunk_size` samples for parallel KING.
+
+8. **KingShards**: Runs `king --duplicate` across all query-chunk × ref-chunk pairs sequentially within the task. Filters the output to only cross-dataset pairs (one sample from query, one from ref), merges, and gzips the result.
+
+9. **SummarizeKing**: Joins the merged `.con.gz` against the query `.fam` to produce a per-sample TSV: each row is one query sample with a comma-separated list of matching reference IDs, or `MISSING` if none found.
+
+**Inputs:**
+
+```json
+{
+  "exome_duplicates.vcf_pairs":    [["ADPKD", "gs://bucket/adpkd.vcf.gz"]],
+  "exome_duplicates.plink_bed":    "gs://bucket/finngen_R14_hm3.bed",
+  "exome_duplicates.plink_prefix": "FG",
+  "exome_duplicates.n_regions":    100,
+  "exome_duplicates.target_snps":  10000,
+  "exome_duplicates.max_het_F":    0.3,
+  "exome_duplicates.chunk_size":   10000
+}
+```
+
+`berisa_blocks` is optional — if omitted the EUR Berisa LD block file is downloaded automatically.
+
+**Outputs:**
+
+- `subset_vcfs[]` / `subset_tbis[]`: Concatenated HM3-subset VCF + index per input dataset (cached for reuse)
+- `snplists[]`: Final SNP list used for KING (HQ variants + random padding, sorted by position)
+- `hq_snplists[]`: HQ-only SNP list before padding — inspect to tune QC thresholds
+- `duplicates_con[]`: Gzipped KING `.con` file with all cross-dataset duplicate pairs
+- `summary[]`: Per-sample TSV — one query sample per row, matched reference IDs or `MISSING`
+- `excluded_samples_query[]` / `excluded_samples_ref[]`: Het-outlier samples removed before KING
+
 
 ## Annotation/QC
 
