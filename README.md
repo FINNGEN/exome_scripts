@@ -8,27 +8,27 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ### Mapping Totals
 
-| GROUP | STATUS | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CLEANLY RESOLVED |  | 41810 | 607 | 7018 | 11828 | 22357 | 92.1% | one-to-one mapping, included in output |
-| CONFLICTS (surjectivity violation) |  | 2821 | 22 | 29 | 417 | 2353 | 6.2% | multiple query samples matched the same ref ID — broken randomly (TODO: QC tiebreaker) |
-| AMBIGUOUS (unresolved) |  | 127 | 0 | 6 | 107 | 14 | 0.3% | multiple ref candidates, no resolution possible; REF_MAPPED = AMBIGUOUS or NA |
-| NO MATCH |  | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
-| TOTAL |  | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
-
-
+| GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| MATCHED | 43204 | 624 | 7033 | 11955 | 23592 | 95.2% | samples with a final QRY→REF mapping in the output |
+| DROPPED | 1554 | 5 | 20 | 397 | 1132 | 3.4% | found by KING but excluded from final mapping |
+| NO MATCH | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
+| TOTAL | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
 
 ### Mapping Breakdown
+
 | GROUP | STATUS | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| CLEANLY RESOLVED | ID_CONFIRMED | 28362 | 601 | 5937 | 0 | 21824 | 62.5% | single candidate; KING match confirmed by matching IDs |
-| CLEANLY RESOLVED | RESOLVED_BY_ID | 58 | 6 | 31 | 0 | 21 | 0.1% | twins in ref; query ID matched one candidate |
-| CLEANLY RESOLVED | INFERRED_BY_ELIMINATION | 4 | 0 | 3 | 1 | 0 | 0.0% | twins in ref; all other candidates already claimed |
-| CLEANLY RESOLVED | UNIQUE | 13386 | 0 | 1047 | 11827 | 512 | 29.5% | single candidate; matched by genetics only |
-| CONFLICTS (surjectivity violation) | CONFLICT_KEPT | 1371 | 11 | 20 | 213 | 1127 | 3.0% | kept in final mapping; 1371 ref ID(s) each claimed by 2+ query samples; avg 2.1 queries per contested ref; randomly broken |
-| CONFLICTS (surjectivity violation) | CONFLICT_DROPPED | 1450 | 11 | 9 | 204 | 1226 | 3.2% | removed from final mapping; REF_MAPPED = NA |
-| AMBIGUOUS (unresolved) | AMBIGUOUS_UNRESOLVED | 127 | 0 | 6 | 107 | 14 | 0.3% | no ID match and not resolvable by elimination |
-| NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no duplicate found |
+| MATCHED | ID_CONFIRMED | 28362 | 601 | 5937 | 0 | 21824 | 62.5% | single candidate; KING match confirmed by matching IDs |
+| MATCHED | RESOLVED_BY_ID | 58 | 6 | 31 | 0 | 21 | 0.1% | twins in ref; query ID matched one candidate |
+| MATCHED | RESOLVED_BY_ALIAS | 1883 | 0 | 1055 | 347 | 481 | 4.1% | twins in ref; candidates are known aliases of each other |
+| MATCHED | INFERRED_BY_ELIMINATION | 4 | 0 | 0 | 4 | 0 | 0.0% | twins in ref; all other candidates already claimed |
+| MATCHED | UNIQUE | 11526 | 0 | 1 | 11480 | 45 | 25.4% | single candidate; matched by genetics only |
+| MATCHED | CONFLICT_KEPT | 1371 | 17 | 9 | 124 | 1221 | 3.0% | contested ref ID; kept after priority tiebreak; 1371 ref IDs contested, avg 31.5 queries/ref |
+| DROPPED | CONFLICT_DROPPED | 1450 | 5 | 20 | 293 | 1132 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
+| DROPPED | AMBIGUOUS_UNRESOLVED | 100 | 0 | 0 | 100 | 0 | 0.2% | multiple ref candidates; no resolution possible |
+| DROPPED | AMBIGUOUS_ALL_TAKEN | 4 | 0 | 0 | 4 | 0 | 0.0% | multiple ref candidates; all already claimed |
+| NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
 
 
 
@@ -92,7 +92,7 @@ MakeRegionSnplists
 
 9. **SummarizeKing**: Uses FID (never prefixed) to join the merged `.con.gz` against the query `.fam`, producing a per-sample TSV: each row is one query sample with a comma-separated list of matching reference FIDs, or `MISSING` if none found. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
 
-10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries and SNP lists, adds a `DATASET` column (query prefix only, e.g. `BOTNIA` not `BOTNIA_vs_FG`), and concatenates them into an intermediate `combined_summary.tsv`. Stacks all per-dataset concordance PNGs vertically into `combined_concordance.png`. Then runs the resolve_mapping logic directly on `combined_summary.tsv` to produce the final mapping and stats outputs.
+10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries, adds a `DATASET` column (query prefix only), and concatenates into an intermediate `{plink_prefix}_EXOME_summary.tsv`. Stacks concordance PNGs into `{plink_prefix}_EXOME_concordance.png`. Then runs the resolve_mapping logic — with optional alias file for twin disambiguation — to produce `{plink_prefix}_EXOME_resolved.tsv`, `_stats.tsv`, and `_stats.md`.
 
 **Inputs:**
 
@@ -101,6 +101,7 @@ MakeRegionSnplists
   "exome_duplicates.vcf_pairs":    [["ADPKD", "gs://bucket/adpkd.vcf.gz"]],
   "exome_duplicates.plink_bed":    "gs://bucket/finngen_R14_hm3.bed",
   "exome_duplicates.plink_prefix": "FG",
+  "exome_duplicates.aliases":      "gs://bucket/finngen_R14_duplicate_list.txt",
   "exome_duplicates.n_regions":    100,
   "exome_duplicates.target_snps":  10000,
   "exome_duplicates.max_het_F":    0.3,
@@ -108,7 +109,7 @@ MakeRegionSnplists
 }
 ```
 
-`berisa_blocks` is optional — if omitted the EUR Berisa LD block file is downloaded automatically.
+`berisa_blocks` and `aliases` are optional. If `aliases` is omitted, alias-based resolution is skipped. The Berisa LD block file is downloaded automatically if not supplied.
 
 **Outputs:**
 
@@ -119,10 +120,10 @@ MakeRegionSnplists
 - `summary[]`: Per-sample TSV — one query sample per row, matched reference IDs or `MISSING`
 - `concordance_plots[]`: Per-dataset concordance diagnostic PNGs
 - `excluded_samples_query[]` / `excluded_samples_ref[]`: Het-outlier samples removed before KING
-- `combined_plot`: All concordance PNGs stacked into a single image
-- `resolved_mapping`: Final QRY→REF mapping — columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`
-- `resolved_stats_tsv`: Combined stats table (group totals block + per-status breakdown block) with per-dataset counts
-- `resolved_stats_md`: Same stats as above in Markdown format, ready to paste into this README
+- `combined_plot`: `{plink_prefix}_EXOME_concordance.png` — all concordance PNGs stacked
+- `resolved_mapping`: `{plink_prefix}_EXOME_resolved.tsv` — final QRY→REF mapping with columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`, `ALIAS_NOTE`
+- `resolved_stats_tsv`: `{plink_prefix}_EXOME_resolved_stats.tsv` — group totals + per-status breakdown with per-dataset counts
+- `resolved_stats_md`: `{plink_prefix}_EXOME_resolved_stats.md` — same stats in Markdown, ready to paste into this README
 
 ---
 
@@ -148,19 +149,13 @@ Handles two real-world complications: twins in the reference (one query matches 
 
 3. **Surjectivity check** — each REF ID must appear at most once in the final mapping. Conflicts (multiple queries claiming the same ref) are broken by random draw for now (`CONFLICT_KEPT[orig]` / `CONFLICT_DROPPED[orig]`). TODO: replace with QC tiebreaker (concordance score, het-F, n_snps).
 
-**Status values** (descending confidence):
+**Output groups:**
 
-| Status | Meaning |
-|--------|---------|
-| `ID_CONFIRMED` | Single candidate; KING match confirmed by matching IDs |
-| `RESOLVED_BY_ID` | Multiple candidates (twins in ref); query ID matched one |
-| `INFERRED_BY_ELIMINATION` | Multiple candidates; all others already claimed |
-| `UNIQUE` | Single candidate; matched by genetics only |
-| `AMBIGUOUS_UNRESOLVED` | Multiple candidates; no resolution possible |
-| `AMBIGUOUS_ALL_TAKEN` | Multiple candidates; all already claimed by other queries |
-| `MISSING` | No KING match found |
-| `CONFLICT_KEPT[<orig>]` | Conflict resolved by random draw; this row kept |
-| `CONFLICT_DROPPED[<orig>]` | Conflict resolved by random draw; removed, REF_MAPPED = NA |
+| Group | Statuses | Meaning |
+|-------|----------|---------|
+| **MATCHED** | `ID_CONFIRMED`, `RESOLVED_BY_ID`, `INFERRED_BY_ELIMINATION`, `UNIQUE`, `CONFLICT_KEPT[...]` | Has a final QRY→REF mapping in the output |
+| **DROPPED** | `CONFLICT_DROPPED[...]`, `AMBIGUOUS_UNRESOLVED`, `AMBIGUOUS_ALL_TAKEN` | Found by KING but excluded from final mapping |
+| **NO MATCH** | `MISSING` | No KING match found |
 
 
 
