@@ -7,28 +7,30 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 ## Summary results
 
 ### Mapping Totals
-| GROUP | STATUS | TOTAL | ADPKD_vs_FG | BOTNIA_vs_FG | DALY_vs_FG | PCT | NOTES |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| CLEANLY RESOLVED |  | 19860 | 619 | 7038 | 12203 | 98.3% | one-to-one mapping, included in output |
-| CONFLICTS  (surjectivity violation) |  | 60 | 10 | 9 | 41 | 0.3% | multiple query samples matched the same ref ID — broken randomly (TODO: QC tiebreaker) |
-| AMBIGUOUS  (unresolved) |  | 114 | 0 | 6 | 108 | 0.6% | multiple ref candidates, no resolution possible; REF_MAPPED = AMBIGUOUS or NA |
-| NO MATCH |  | 164 | 0 | 111 | 53 | 0.8% | absent from ref or below KING concordance threshold |
-| TOTAL |  | 20198 | 629 | 7164 | 12405 | 100.0% |  |
+
+| GROUP | STATUS | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CLEANLY RESOLVED |  | 41810 | 607 | 7018 | 11828 | 22357 | 92.1% | one-to-one mapping, included in output |
+| CONFLICTS (surjectivity violation) |  | 2821 | 22 | 29 | 417 | 2353 | 6.2% | multiple query samples matched the same ref ID — broken randomly (TODO: QC tiebreaker) |
+| AMBIGUOUS (unresolved) |  | 127 | 0 | 6 | 107 | 14 | 0.3% | multiple ref candidates, no resolution possible; REF_MAPPED = AMBIGUOUS or NA |
+| NO MATCH |  | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
+| TOTAL |  | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
+
+
 
 ### Mapping Breakdown
+| GROUP | STATUS | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| CLEANLY RESOLVED | ID_CONFIRMED | 28362 | 601 | 5937 | 0 | 21824 | 62.5% | single candidate; KING match confirmed by matching IDs |
+| CLEANLY RESOLVED | RESOLVED_BY_ID | 58 | 6 | 31 | 0 | 21 | 0.1% | twins in ref; query ID matched one candidate |
+| CLEANLY RESOLVED | INFERRED_BY_ELIMINATION | 4 | 0 | 3 | 1 | 0 | 0.0% | twins in ref; all other candidates already claimed |
+| CLEANLY RESOLVED | UNIQUE | 13386 | 0 | 1047 | 11827 | 512 | 29.5% | single candidate; matched by genetics only |
+| CONFLICTS (surjectivity violation) | CONFLICT_KEPT | 1371 | 11 | 20 | 213 | 1127 | 3.0% | kept in final mapping; 1371 ref ID(s) each claimed by 2+ query samples; avg 2.1 queries per contested ref; randomly broken |
+| CONFLICTS (surjectivity violation) | CONFLICT_DROPPED | 1450 | 11 | 9 | 204 | 1226 | 3.2% | removed from final mapping; REF_MAPPED = NA |
+| AMBIGUOUS (unresolved) | AMBIGUOUS_UNRESOLVED | 127 | 0 | 6 | 107 | 14 | 0.3% | no ID match and not resolvable by elimination |
+| NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no duplicate found |
 
-| GROUP | STATUS | TOTAL | ADPKD_vs_FG | BOTNIA_vs_FG | DALY_vs_FG | PCT | NOTES |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| CLEANLY RESOLVED | ID_CONFIRMED | 6553 | 613 | 5940 | 0 | 32.4% | single candidate; KING match confirmed by matching IDs |
-| CLEANLY RESOLVED | RESOLVED_BY_ID | 37 | 6 | 31 | 0 | 0.2% | twins in ref; query ID matched one candidate |
-| CLEANLY RESOLVED | INFERRED_BY_ELIMINATION | 3 | 0 | 3 | 0 | 0.0% | twins in ref; all other candidates already claimed |
-| CLEANLY RESOLVED | UNIQUE | 13267 | 0 | 1064 | 12203 | 65.7% | single candidate; matched by genetics only (no independent ID confirmation) |
-| CONFLICTS  (surjectivity violation) | CONFLICT_KEPT | 30 | 8 | 7 | 15 | 0.1% | kept in final mapping; 30 ref ID(s) each claimed by 2+ query samples; avg 2.0 queries per contested ref; randomly broken — replace with QC tiebreaker |
-| CONFLICTS  (surjectivity violation) | CONFLICT_DROPPED | 30 | 2 | 2 | 26 | 0.1% | removed from final mapping; REF_MAPPED = NA |
-| AMBIGUOUS  (unresolved) | AMBIGUOUS_UNRESOLVED | 114 | 0 | 6 | 108 | 0.6% | no ID match and not resolvable by elimination |
-| NO MATCH | MISSING | 164 | 0 | 111 | 53 | 0.8% | no duplicate found |
 
----
 
 ## SAMPLE MATCHING
 
