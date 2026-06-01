@@ -116,9 +116,7 @@ workflow exome_duplicates {
     Array[File]        duplicates_con         = KingShards.duplicates_con
     Array[File]        excluded_samples_query = PrepQuery.excluded_samples
     Array[File]        excluded_samples_ref   = PrepRef.excluded_samples
-    File               combined_summary       = GatherResults.combined_summary
     File               combined_plot          = GatherResults.combined_plot
-    File               global_summary         = GatherResults.global_summary
     File               resolved_mapping       = GatherResults.resolved_mapping
     File               resolved_stats_tsv     = GatherResults.resolved_stats_tsv
     File               resolved_stats_md      = GatherResults.resolved_stats_md
