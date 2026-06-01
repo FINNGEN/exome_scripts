@@ -2,7 +2,7 @@
 
 ## SAMPLE MATCHING
 
-Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship (`exome_duplicates.wdl`).
+Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship (`exome_duplicates.wdl`), followed by post-processing with `scripts/resolve_mapping.py` to produce a clean final mapping.
 
 ### exome_duplicates.wdl
 
@@ -37,6 +37,9 @@ MakeRegionSnplists
                    │
              GatherResults
              (combine summaries, plots, global stats)
+                   │
+           resolve_mapping.py              [post-processing]
+           (resolve ambiguities, final mapping + stats)
 ```
 
 **Step-by-step:**
@@ -53,13 +56,13 @@ MakeRegionSnplists
 
 6. **FilterSNPs** *(runs in parallel with SubsetRef)*: Applies QC filters to the query plink (`--geno`, `--hwe`, `--maf`). High-quality variants go to the top of the list; the remaining variants are shuffled and appended below. `head -n target_snps | sort -V` then takes the top N sorted by genomic position. Outputs both the final SNP list and the HQ-only list for parameter inspection.
 
-7. **PrepQuery / PrepRef**: Subsets each plink dataset to the final SNP list, removes samples with inbreeding coefficient F > `max_het_F`, annotates sample IDs with the dataset prefix (`PREFIX_SAMPLEID`), and splits into chunks of `chunk_size` samples for parallel KING.
+7. **PrepQuery / PrepRef**: Subsets each plink dataset to the final SNP list, removes samples with inbreeding coefficient F > `max_het_F`, annotates IIDs with a dataset prefix (`PREFIX_SAMPLEID`) so KING can distinguish query from ref samples, and splits into chunks of `chunk_size` samples for parallel KING. Note: only IID is prefixed, not FID — the prefix is used internally and stripped back when building the summary.
 
-8. **KingShards**: Runs `king --duplicate` across all query-chunk × ref-chunk pairs sequentially within the task. Filters the output to only cross-dataset pairs (one sample from query, one from ref), merges, and gzips the result.
+8. **KingShards**: Runs `king --duplicate` across all query-chunk × ref-chunk pairs sequentially within the task. Filters the `.con` output to only cross-dataset pairs (one sample has the query prefix on IID, the other does not), merges, and gzips the result.
 
-9. **SummarizeKing**: Joins the merged `.con.gz` against the query `.fam` to produce a per-sample TSV: each row is one query sample with a comma-separated list of matching reference IDs, or `MISSING` if none found. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
+9. **SummarizeKing**: Uses FID (never prefixed) to join the merged `.con.gz` against the query `.fam`, producing a per-sample TSV: each row is one query sample with a comma-separated list of matching reference FIDs, or `MISSING` if none found. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
 
-10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries and SNP lists, adds a `DATASET` column, and concatenates them into `combined_summary.tsv`. Computes `global_summary.tsv` with one row per dataset: total query samples, number matched, percent matched, number of ambiguous matches (multiple ref hits), and SNP count used. Also stacks all per-dataset concordance PNGs vertically into `combined_concordance.png`.
+10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries and SNP lists, adds a `DATASET` column (query prefix only, e.g. `BOTNIA` not `BOTNIA_vs_FG`), and concatenates them into `combined_summary.tsv`. Computes `global_summary.tsv` with one row per dataset: total query samples, number matched, percent matched, number of ambiguous matches, and SNP count used. Also stacks all per-dataset concordance PNGs vertically into `combined_concordance.png`.
 
 **Inputs:**
 
@@ -86,9 +89,55 @@ MakeRegionSnplists
 - `summary[]`: Per-sample TSV — one query sample per row, matched reference IDs or `MISSING`
 - `concordance_plots[]`: Per-dataset concordance diagnostic PNGs
 - `excluded_samples_query[]` / `excluded_samples_ref[]`: Het-outlier samples removed before KING
-- `combined_summary`: All per-dataset summaries concatenated with a `DATASET` column
+- `combined_summary`: All per-dataset summaries concatenated with a `DATASET` column (query prefix only)
 - `combined_plot`: All concordance PNGs stacked into a single image
 - `global_summary`: One row per dataset — TOTAL_QUERY, N_MATCHED, PCT_MATCHED, N_AMBIGUOUS, N_SNPS
+
+---
+
+### resolve_mapping.py
+
+Post-processes `combined_summary.tsv` to produce a final, disambiguated QRY→REF mapping. Handles two real-world complications: twins in the reference (one query matches multiple ref candidates) and duplicate samples within the query cohort (multiple queries match the same ref).
+
+**Usage:**
+
+```bash
+python scripts/resolve_mapping.py combined_summary.tsv
+# outputs to combined_summary_resolved.tsv + combined_summary_resolved_stats.tsv by default
+
+python scripts/resolve_mapping.py combined_summary.tsv --out my_mapping.tsv --seed 42
+```
+
+**How it works (three passes):**
+
+1. **Categorise**: Each row is classified independently based on the number of candidates in the DUPLICATES column:
+   - Single candidate, IDs match → `ID_CONFIRMED` (genetic match + ID agreement, strongest evidence)
+   - Single candidate, IDs differ → `UNIQUE` (genetic match only, normal case)
+   - Multiple candidates, query ID is one of them → `RESOLVED_BY_ID` (twins in ref; query ID identifies the right one)
+   - Multiple candidates, no ID match → `AMBIGUOUS_UNRESOLVED`
+
+2. **Disambiguate by elimination**: For remaining `AMBIGUOUS_UNRESOLVED` rows, candidates already claimed by resolved rows are removed. Repeats until stable (one resolution can cascade into another). A row with exactly one free candidate becomes `INFERRED_BY_ELIMINATION`; a row with zero free candidates becomes `AMBIGUOUS_ALL_TAKEN`.
+
+3. **Surjectivity check**: Ensures each REF ID appears in the final mapping at most once. Any REF claimed by multiple queries is flagged as a conflict and broken by random draw (`CONFLICT_KEPT` / `CONFLICT_DROPPED`). The random tiebreaker is a placeholder — replace with a QC score (concordance, het-F, n_snps) once available.
+
+**Output files:**
+
+- `<stem>_resolved.tsv`: Final mapping with columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`
+- `<stem>_resolved_stats.tsv`: Combined stats table — group-level totals block followed by a blank separator row and the per-status breakdown block. Columns: `SECTION`, `GROUP`, `STATUS`, `TOTAL`, one column per dataset, `PCT`, `NOTES`
+
+**Status values** (descending confidence):
+
+| Status | Meaning |
+|--------|---------|
+| `ID_CONFIRMED` | Single candidate; KING match confirmed by matching IDs |
+| `RESOLVED_BY_ID` | Multiple candidates (twins in ref); query ID matched one |
+| `INFERRED_BY_ELIMINATION` | Multiple candidates; all others already claimed |
+| `UNIQUE` | Single candidate; matched by genetics only |
+| `AMBIGUOUS_UNRESOLVED` | Multiple candidates; no resolution possible |
+| `AMBIGUOUS_ALL_TAKEN` | Multiple candidates; all already claimed by other queries |
+| `MISSING` | No KING match found |
+| `CONFLICT_KEPT[<orig>]` | Conflict resolved by random draw; this row kept |
+| `CONFLICT_DROPPED[<orig>]` | Conflict resolved by random draw; removed, REF_MAPPED = NA |
 
 
 ## Annotation/QC

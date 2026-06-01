@@ -716,7 +716,7 @@ dfs = []
 global_rows = []
 
 for sf, sl in zip(summary_files, snplist_files):
-    dataset = os.path.basename(sf).replace(".summary.tsv", "")
+    dataset = os.path.basename(sf).replace(".summary.tsv", "").split("_vs_")[0]
     df = pd.read_csv(sf, sep="\t")
     df.insert(0, "DATASET", dataset)
     dfs.append(df)
