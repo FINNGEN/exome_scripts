@@ -1,5 +1,37 @@
 # EXOME data processing
 
+Scripts and WDL workflows for QC-filtering and sample-matching multiple exome cohorts (BOTNIA, ADPKD, DALY, WES) against the FinnGen R14 reference panel. The primary goal is to identify which exome samples correspond to FinnGen participants, enabling downstream data integration. Sample matching uses KING --duplicate on a curated set of ~10,000 HM3 SNPs. Variant QC and genotype filtering are handled by a set of bcftools-based WDL workflows.
+
+---
+
+## Summary results
+
+### Mapping Totals
+| GROUP | STATUS | TOTAL | ADPKD_vs_FG | BOTNIA_vs_FG | DALY_vs_FG | PCT | NOTES |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CLEANLY RESOLVED |  | 19860 | 619 | 7038 | 12203 | 98.3% | one-to-one mapping, included in output |
+| CONFLICTS  (surjectivity violation) |  | 60 | 10 | 9 | 41 | 0.3% | multiple query samples matched the same ref ID — broken randomly (TODO: QC tiebreaker) |
+| AMBIGUOUS  (unresolved) |  | 114 | 0 | 6 | 108 | 0.6% | multiple ref candidates, no resolution possible; REF_MAPPED = AMBIGUOUS or NA |
+| NO MATCH |  | 164 | 0 | 111 | 53 | 0.8% | absent from ref or below KING concordance threshold |
+| TOTAL |  | 20198 | 629 | 7164 | 12405 | 100.0% |  |
+
+### Mapping Breakdown
+
+| GROUP | STATUS | TOTAL | ADPKD_vs_FG | BOTNIA_vs_FG | DALY_vs_FG | PCT | NOTES |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| CLEANLY RESOLVED | ID_CONFIRMED | 6553 | 613 | 5940 | 0 | 32.4% | single candidate; KING match confirmed by matching IDs |
+| CLEANLY RESOLVED | RESOLVED_BY_ID | 37 | 6 | 31 | 0 | 0.2% | twins in ref; query ID matched one candidate |
+| CLEANLY RESOLVED | INFERRED_BY_ELIMINATION | 3 | 0 | 3 | 0 | 0.0% | twins in ref; all other candidates already claimed |
+| CLEANLY RESOLVED | UNIQUE | 13267 | 0 | 1064 | 12203 | 65.7% | single candidate; matched by genetics only (no independent ID confirmation) |
+| CONFLICTS  (surjectivity violation) | CONFLICT_KEPT | 30 | 8 | 7 | 15 | 0.1% | kept in final mapping; 30 ref ID(s) each claimed by 2+ query samples; avg 2.0 queries per contested ref; randomly broken — replace with QC tiebreaker |
+| CONFLICTS  (surjectivity violation) | CONFLICT_DROPPED | 30 | 2 | 2 | 26 | 0.1% | removed from final mapping; REF_MAPPED = NA |
+| AMBIGUOUS  (unresolved) | AMBIGUOUS_UNRESOLVED | 114 | 0 | 6 | 108 | 0.6% | no ID match and not resolvable by elimination |
+| NO MATCH | MISSING | 164 | 0 | 111 | 53 | 0.8% | no duplicate found |
+
+### Mapping Breakdown
+
+---
+
 ## SAMPLE MATCHING
 
 Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship (`exome_duplicates.wdl`), followed by post-processing with `scripts/resolve_mapping.py` to produce a clean final mapping.
@@ -62,7 +94,7 @@ MakeRegionSnplists
 
 9. **SummarizeKing**: Uses FID (never prefixed) to join the merged `.con.gz` against the query `.fam`, producing a per-sample TSV: each row is one query sample with a comma-separated list of matching reference FIDs, or `MISSING` if none found. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
 
-10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries and SNP lists, adds a `DATASET` column (query prefix only, e.g. `BOTNIA` not `BOTNIA_vs_FG`), and concatenates them into `combined_summary.tsv`. Computes `global_summary.tsv` with one row per dataset: total query samples, number matched, percent matched, number of ambiguous matches, and SNP count used. Also stacks all per-dataset concordance PNGs vertically into `combined_concordance.png`.
+10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries and SNP lists, adds a `DATASET` column (query prefix only, e.g. `BOTNIA` not `BOTNIA_vs_FG`), and concatenates them into `combined_summary.tsv`. Computes `global_summary.tsv` with one row per dataset: total query samples, number matched, percent matched, number of ambiguous matches, and SNP count used. Also stacks all per-dataset concordance PNGs vertically into `combined_concordance.png`. Finally runs the resolve_mapping logic (see below) directly on `combined_summary.tsv` to produce the final mapping and stats outputs.
 
 **Inputs:**
 
@@ -92,38 +124,33 @@ MakeRegionSnplists
 - `combined_summary`: All per-dataset summaries concatenated with a `DATASET` column (query prefix only)
 - `combined_plot`: All concordance PNGs stacked into a single image
 - `global_summary`: One row per dataset — TOTAL_QUERY, N_MATCHED, PCT_MATCHED, N_AMBIGUOUS, N_SNPS
+- `resolved_mapping`: Final QRY→REF mapping — columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`
+- `resolved_stats_tsv`: Combined stats table (group totals block + per-status breakdown block) with per-dataset counts
+- `resolved_stats_md`: Same stats as above in Markdown format, ready to paste below
 
 ---
 
-### resolve_mapping.py
+### Resolve mapping logic
 
-Post-processes `combined_summary.tsv` to produce a final, disambiguated QRY→REF mapping. Handles two real-world complications: twins in the reference (one query matches multiple ref candidates) and duplicate samples within the query cohort (multiple queries match the same ref).
-
-**Usage:**
+Runs inside `GatherResults` on `combined_summary.tsv`. Also available standalone via `scripts/resolve_mapping.py` for local re-runs without re-executing the full WDL.
 
 ```bash
-python scripts/resolve_mapping.py combined_summary.tsv
-# outputs to combined_summary_resolved.tsv + combined_summary_resolved_stats.tsv by default
-
-python scripts/resolve_mapping.py combined_summary.tsv --out my_mapping.tsv --seed 42
+python scripts/resolve_mapping.py combined_summary.tsv [--out my_mapping.tsv] [--seed 42]
 ```
 
-**How it works (three passes):**
+Handles two real-world complications: twins in the reference (one query matches multiple ref candidates) and true duplicates within a query cohort (multiple queries match the same ref ID).
 
-1. **Categorise**: Each row is classified independently based on the number of candidates in the DUPLICATES column:
-   - Single candidate, IDs match → `ID_CONFIRMED` (genetic match + ID agreement, strongest evidence)
-   - Single candidate, IDs differ → `UNIQUE` (genetic match only, normal case)
-   - Multiple candidates, query ID is one of them → `RESOLVED_BY_ID` (twins in ref; query ID identifies the right one)
+**Three passes:**
+
+1. **Categorise** — each row classified independently:
+   - Single candidate, IDs match → `ID_CONFIRMED` (genetic + ID agreement, strongest evidence)
+   - Single candidate, IDs differ → `UNIQUE` (genetics only, the normal case)
+   - Multiple candidates, query ID is one of them → `RESOLVED_BY_ID` (twins in ref; ID identifies the right one)
    - Multiple candidates, no ID match → `AMBIGUOUS_UNRESOLVED`
 
-2. **Disambiguate by elimination**: For remaining `AMBIGUOUS_UNRESOLVED` rows, candidates already claimed by resolved rows are removed. Repeats until stable (one resolution can cascade into another). A row with exactly one free candidate becomes `INFERRED_BY_ELIMINATION`; a row with zero free candidates becomes `AMBIGUOUS_ALL_TAKEN`.
+2. **Disambiguate by elimination** — for `AMBIGUOUS_UNRESOLVED` rows, candidates already claimed by resolved rows are removed; repeats until stable. One free candidate left → `INFERRED_BY_ELIMINATION`. Zero free candidates → `AMBIGUOUS_ALL_TAKEN`.
 
-3. **Surjectivity check**: Ensures each REF ID appears in the final mapping at most once. Any REF claimed by multiple queries is flagged as a conflict and broken by random draw (`CONFLICT_KEPT` / `CONFLICT_DROPPED`). The random tiebreaker is a placeholder — replace with a QC score (concordance, het-F, n_snps) once available.
-
-**Output files:**
-
-- `<stem>_resolved.tsv`: Final mapping with columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`
-- `<stem>_resolved_stats.tsv`: Combined stats table — group-level totals block followed by a blank separator row and the per-status breakdown block. Columns: `SECTION`, `GROUP`, `STATUS`, `TOTAL`, one column per dataset, `PCT`, `NOTES`
+3. **Surjectivity check** — each REF ID must appear at most once in the final mapping. Conflicts (multiple queries claiming the same ref) are broken by random draw for now (`CONFLICT_KEPT[orig]` / `CONFLICT_DROPPED[orig]`). TODO: replace with QC tiebreaker (concordance score, het-F, n_snps).
 
 **Status values** (descending confidence):
 
@@ -138,6 +165,7 @@ python scripts/resolve_mapping.py combined_summary.tsv --out my_mapping.tsv --se
 | `MISSING` | No KING match found |
 | `CONFLICT_KEPT[<orig>]` | Conflict resolved by random draw; this row kept |
 | `CONFLICT_DROPPED[<orig>]` | Conflict resolved by random draw; removed, REF_MAPPED = NA |
+
 
 
 ## Annotation/QC

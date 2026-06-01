@@ -119,6 +119,9 @@ workflow exome_duplicates {
     File               combined_summary       = GatherResults.combined_summary
     File               combined_plot          = GatherResults.combined_plot
     File               global_summary         = GatherResults.global_summary
+    File               resolved_mapping       = GatherResults.resolved_mapping
+    File               resolved_stats_tsv     = GatherResults.resolved_stats_tsv
+    File               resolved_stats_md      = GatherResults.resolved_stats_md
   }
 }
 
@@ -766,12 +769,214 @@ plt.tight_layout()
 plt.savefig("combined_concordance.png", dpi=150, bbox_inches="tight")
 print(f"Combined {len(plot_files)} plots")
 PYEOF
+
+  python3 << PYEOF
+import pandas as pd
+import random
+
+# ── constants ────────────────────────────────────────────────────────────────
+
+RESOLVED = {"ID_CONFIRMED", "RESOLVED_BY_ID", "INFERRED_BY_ELIMINATION", "UNIQUE"}
+
+SUMMARY_GROUPS = [
+    (
+        "CLEANLY RESOLVED",
+        "one-to-one mapping, included in output",
+        [
+            ("ID_CONFIRMED",            "single candidate; KING match confirmed by matching IDs"),
+            ("RESOLVED_BY_ID",          "twins in ref; query ID matched one candidate"),
+            ("INFERRED_BY_ELIMINATION", "twins in ref; all other candidates already claimed"),
+            ("UNIQUE",                  "single candidate; matched by genetics only"),
+        ],
+    ),
+    (
+        "CONFLICTS (surjectivity violation)",
+        "multiple query samples matched the same ref ID — broken randomly (TODO: QC tiebreaker)",
+        [
+            ("CONFLICT_KEPT",    "kept in final mapping"),
+            ("CONFLICT_DROPPED", "removed from final mapping; REF_MAPPED = NA"),
+        ],
+    ),
+    (
+        "AMBIGUOUS (unresolved)",
+        "multiple ref candidates, no resolution possible; REF_MAPPED = AMBIGUOUS or NA",
+        [
+            ("AMBIGUOUS_UNRESOLVED", "no ID match and not resolvable by elimination"),
+            ("AMBIGUOUS_ALL_TAKEN",  "all candidates already claimed by other queries"),
+        ],
+    ),
+    (
+        "NO MATCH",
+        "absent from ref or below KING concordance threshold",
+        [
+            ("MISSING", "no duplicate found"),
+        ],
+    ),
+]
+
+# ── passes ───────────────────────────────────────────────────────────────────
+
+def initial_categorise(df):
+    records = []
+    for _, row in df.iterrows():
+        dataset = row["DATASET"]
+        query   = str(row["QUERY"]).strip()
+        raw     = str(row["DUPLICATES"]).strip()
+        if raw in ("MISSING", "nan", ""):
+            records.append(dict(DATASET=dataset, QUERY=query, REF_MAPPED="NA",  CANDIDATES="",  STATUS="MISSING"))
+            continue
+        seen, candidates = set(), []
+        for c in raw.split(","):
+            c = c.strip()
+            if c and c not in seen:
+                candidates.append(c); seen.add(c)
+        if len(candidates) == 1:
+            ref    = candidates[0]
+            status = "ID_CONFIRMED" if query == ref else "UNIQUE"
+            records.append(dict(DATASET=dataset, QUERY=query, REF_MAPPED=ref,         CANDIDATES=raw, STATUS=status))
+        else:
+            if query in candidates:
+                records.append(dict(DATASET=dataset, QUERY=query, REF_MAPPED=query,     CANDIDATES=raw, STATUS="RESOLVED_BY_ID"))
+            else:
+                records.append(dict(DATASET=dataset, QUERY=query, REF_MAPPED="AMBIGUOUS", CANDIDATES=raw, STATUS="AMBIGUOUS_UNRESOLVED"))
+    return pd.DataFrame(records)
+
+def disambiguate_by_elimination(result):
+    claimed = set(result.loc[result["STATUS"].isin(RESOLVED), "REF_MAPPED"])
+    changed = True
+    while changed:
+        changed = False
+        for idx, row in result[result["STATUS"] == "AMBIGUOUS_UNRESOLVED"].iterrows():
+            free = [c.strip() for c in row["CANDIDATES"].split(",") if c.strip() and c.strip() not in claimed]
+            if len(free) == 1:
+                result.at[idx, "REF_MAPPED"] = free[0]
+                result.at[idx, "STATUS"]     = "INFERRED_BY_ELIMINATION"
+                claimed.add(free[0]); changed = True
+            elif len(free) == 0:
+                result.at[idx, "STATUS"] = "AMBIGUOUS_ALL_TAKEN"; changed = True
+    return result
+
+def check_surjectivity(result, rng):
+    ref_to_idx = {}
+    for idx, row in result[result["STATUS"].isin(RESOLVED)].iterrows():
+        ref_to_idx.setdefault(row["REF_MAPPED"], []).append(idx)
+    for ref_id, indices in ref_to_idx.items():
+        if len(indices) == 1:
+            continue
+        # TODO: replace with QC tiebreaker (concordance score, het_F, n_snps)
+        winner = rng.choice(indices)
+        for idx in indices:
+            orig = result.at[idx, "STATUS"]
+            if idx == winner:
+                result.at[idx, "STATUS"] = f"CONFLICT_KEPT[{orig}]"
+            else:
+                result.at[idx, "STATUS"]     = f"CONFLICT_DROPPED[{orig}]"
+                result.at[idx, "REF_MAPPED"] = "NA"
+    return result
+
+# ── stats table ──────────────────────────────────────────────────────────────
+
+def _pct(n, total):
+    return f"{n / total * 100:.1f}%" if total else "n/a"
+
+def _conflict_note(result, group_n):
+    if group_n == 0:
+        return ""
+    kept = result[result["STATUS"].str.startswith("CONFLICT_KEPT")]
+    n_contested = kept["REF_MAPPED"].nunique()
+    avg = group_n / n_contested if n_contested else 0
+    return (f"{n_contested} ref ID(s) each claimed by 2+ query samples; "
+            f"avg {avg:.1f} queries per contested ref; randomly broken")
+
+def build_stats_table(result):
+    n_total   = len(result)
+    datasets  = sorted(result["DATASET"].unique())
+    ds_counts = {ds: result[result["DATASET"] == ds]["STATUS"].value_counts() for ds in datasets}
+    gc        = result["STATUS"].value_counts()
+    cols      = ["SECTION", "GROUP", "STATUS", "TOTAL"] + datasets + ["PCT", "NOTES"]
+
+    def pfx_n(prefix, vc):
+        return sum(v for k, v in vc.items() if k.startswith(prefix))
+
+    def blank():
+        return {c: "" for c in cols}
+
+    totals_rows, breakdown_rows = [], []
+    for group_header, group_note, statuses in SUMMARY_GROUPS:
+        prefixes = [s for s, _ in statuses]
+        group_n  = sum(pfx_n(p, gc) for p in prefixes)
+        row = dict(SECTION="TOTALS", GROUP=group_header, STATUS="",
+                   TOTAL=group_n, PCT=_pct(group_n, n_total), NOTES=group_note)
+        for ds in datasets:
+            row[ds] = sum(pfx_n(p, ds_counts[ds]) for p in prefixes)
+        totals_rows.append(row)
+        for prefix, desc in statuses:
+            n = pfx_n(prefix, gc)
+            if n == 0:
+                continue
+            note = desc + ("; " + _conflict_note(result, group_n) if prefix == "CONFLICT_KEPT" else "")
+            row = dict(SECTION="BREAKDOWN", GROUP=group_header, STATUS=prefix,
+                       TOTAL=n, PCT=_pct(n, n_total), NOTES=note)
+            for ds in datasets:
+                row[ds] = pfx_n(prefix, ds_counts[ds])
+            breakdown_rows.append(row)
+    row = dict(SECTION="TOTALS", GROUP="TOTAL", STATUS="", TOTAL=n_total, PCT="100.0%", NOTES="")
+    for ds in datasets:
+        row[ds] = (result["DATASET"] == ds).sum()
+    totals_rows.append(row)
+    separator = blank(); separator["SECTION"] = "---"
+    return pd.DataFrame(totals_rows + [separator] + breakdown_rows, columns=cols)
+
+# ── markdown helpers ──────────────────────────────────────────────────────────
+
+def df_to_md(df):
+    cols  = list(df.columns)
+    lines = ["| " + " | ".join(str(c) for c in cols) + " |",
+             "| " + " | ".join("---" for _ in cols) + " |"]
+    for _, row in df.iterrows():
+        lines.append("| " + " | ".join("" if str(v) == "nan" else str(v) for v in row) + " |")
+    return "\n".join(lines)
+
+# ── run ───────────────────────────────────────────────────────────────────────
+
+df     = pd.read_csv("combined_summary.tsv", sep="\t")
+result = initial_categorise(df)
+result = disambiguate_by_elimination(result)
+result = check_surjectivity(result, random.Random(42))
+
+result[["QUERY", "REF_MAPPED", "DATASET", "STATUS", "CANDIDATES"]].to_csv(
+    "combined_summary_resolved.tsv", sep="\t", index=False)
+
+stats = build_stats_table(result)
+stats.to_csv("combined_summary_resolved_stats.tsv", sep="\t", index=False)
+
+totals    = stats[stats["SECTION"] == "TOTALS"].drop(columns="SECTION").reset_index(drop=True)
+breakdown = stats[stats["SECTION"] == "BREAKDOWN"].drop(columns="SECTION").reset_index(drop=True)
+
+with open("combined_summary_resolved_stats.md", "w") as fh:
+    fh.write("## Mapping Totals\n\n")
+    fh.write(df_to_md(totals))
+    fh.write("\n\n## Mapping Breakdown\n\n")
+    fh.write(df_to_md(breakdown))
+    fh.write("\n")
+
+n_total = len(result)
+gc = result["STATUS"].value_counts()
+def pfx_n(p, vc): return sum(v for k, v in vc.items() if k.startswith(p))
+print(f"\nResolved mapping: {n_total:,} samples")
+for group_header, _, statuses in SUMMARY_GROUPS:
+    group_n = sum(pfx_n(p, gc) for p, _ in statuses)
+    print(f"  {group_header:<40} {group_n:>6}  ({_pct(group_n, n_total)})")
+PYEOF
   >>>
 
   output {
-    File combined_summary = "combined_summary.tsv"
-    File combined_plot    = "combined_concordance.png"
-    File global_summary   = "global_summary.tsv"
+    File combined_summary          = "combined_summary.tsv"
+    File combined_plot             = "combined_concordance.png"
+    File global_summary            = "global_summary.tsv"
+    File resolved_mapping          = "combined_summary_resolved.tsv"
+    File resolved_stats_tsv        = "combined_summary_resolved_stats.tsv"
+    File resolved_stats_md         = "combined_summary_resolved_stats.md"
   }
 
   meta {
