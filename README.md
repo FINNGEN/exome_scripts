@@ -36,9 +36,7 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 </td>
 <td valign="top" width="520">
-
-![Mapping flowchart](data/FG_exome_resolved_flowchart.png)
-
+<img src="data/FG_exome_resolved_flowchart.png" width="520" alt="Mapping flowchart">
 </td>
 </tr>
 </table>
