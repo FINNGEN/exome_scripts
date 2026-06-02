@@ -6,10 +6,6 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ## Summary results
 
-<table>
-<tr>
-<td valign="top">
-
 ### Mapping Totals
 
 | GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
@@ -34,12 +30,9 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 | DROPPED | AMBIGUOUS_ALL_TAKEN | 4 | 0 | 0 | 4 | 0 | 0.0% | multiple ref candidates; all already claimed |
 | NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
 
-</td>
-<td valign="top" width="520">
-<img src="data/FG_exome_resolved_flowchart.png" width="520" alt="Mapping flowchart">
-</td>
-</tr>
-</table>
+### Mapping flowchart
+
+![Mapping flowchart](data/FG_exome_resolved_flowchart.png)
 
 
 
