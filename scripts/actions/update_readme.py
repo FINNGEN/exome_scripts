@@ -8,11 +8,11 @@ Any block in README.md bounded by:
 is replaced with the current contents of that file (path relative to repo root).
 
 Usage:
-    python scripts/update_readme.py
+    python scripts/actions/update_readme.py
 """
 import pathlib, re, sys
 
-REPO   = pathlib.Path(__file__).resolve().parent.parent
+REPO   = pathlib.Path(__file__).resolve().parent.parent.parent
 README = REPO / "README.md"
 
 MARKER = re.compile(
