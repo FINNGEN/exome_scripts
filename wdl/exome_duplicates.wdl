@@ -719,8 +719,7 @@ task GatherResults {
   done >> "${PREFIX}_combined_summary.tsv"
 
   # ── 2. Stack per-dataset concordance plots ──────────────────────────────
-  mapfile -t plot_files < "~{write_lines(plots)}"
-  convert -append "${plot_files[@]}" "${PREFIX}_concordance.png"
+  python3 -c "import matplotlib,os; matplotlib.use('Agg'); import matplotlib.pyplot as P,matplotlib.image as I; pf=[l.strip() for l in open('~{write_lines(plots)}') if l.strip()]; fig,ax=P.subplots(len(pf),1,figsize=(14,5*len(pf))); ax=[ax] if len(pf)==1 else list(ax); [a.imshow(I.imread(f)) or a.axis('off') or a.set_title(os.path.basename(f).replace('_concordance.png',''),fontsize=12) for a,f in zip(ax,pf)]; P.tight_layout(); P.savefig('${PREFIX}_concordance.png',dpi=150,bbox_inches='tight')"
 
   # ── 3. Resolve mapping, stats, and flowchart ────────────────────────────
   python3 /scripts/resolve_mapping.py \
