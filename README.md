@@ -6,6 +6,10 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ## Summary results
 
+<table>
+<tr>
+<td valign="top">
+
 ### Mapping Totals
 
 | GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
@@ -29,6 +33,15 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 | DROPPED | AMBIGUOUS_UNRESOLVED | 100 | 0 | 0 | 100 | 0 | 0.2% | multiple ref candidates; no resolution possible |
 | DROPPED | AMBIGUOUS_ALL_TAKEN | 4 | 0 | 0 | 4 | 0 | 0.0% | multiple ref candidates; all already claimed |
 | NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
+
+</td>
+<td valign="top" width="520">
+
+![Mapping flowchart](data/FG_exome_resolved_flowchart.png)
+
+</td>
+</tr>
+</table>
 
 
 
@@ -156,6 +169,78 @@ Handles two real-world complications: twins in the reference (one query matches 
 | **MATCHED** | `ID_CONFIRMED`, `RESOLVED_BY_ID`, `INFERRED_BY_ELIMINATION`, `UNIQUE`, `CONFLICT_KEPT[...]` | Has a final QRY→REF mapping in the output |
 | **DROPPED** | `CONFLICT_DROPPED[...]`, `AMBIGUOUS_UNRESOLVED`, `AMBIGUOUS_ALL_TAKEN` | Found by KING but excluded from final mapping |
 | **NO MATCH** | `MISSING` | No KING match found |
+
+**Alias handling** — an optional tab-delimited file maps QRY IDs that are known aliases of REF IDs (one alias group per line, REF ID first). This is used solely to resolve QRY-side ambiguity: only the query is looked up in the alias file; REF candidates are treated as ground truth and never cross-referenced. A query in the alias file whose single candidate is listed as its alias → `RESOLVED_BY_ALIAS`; a query with multiple candidates where exactly one is in the query's alias group → also `RESOLVED_BY_ALIAS`. Alias IDs cannot appear in `REF_MAPPED`; a post-processing check enforces this.
+
+**Test mode** — a self-contained test dataset covering every status category can be run without any input files:
+
+```bash
+python scripts/resolve_mapping.py --test
+```
+
+The output below shows the built-in input, the alias groups used, and the resolved mapping for each row:
+
+```
+====================================================================
+                    TEST MODE — built-in dataset                    
+====================================================================
+
+── INPUT ───────────────────────────────────────────────────────────
+DATASET       QUERY    DUPLICATES
+    ds1      REF001        REF001
+    ds1      QRY001        REF002
+    ds1   QRY_ALIAS   REF_ALIAS_A
+    ds1      REF_T1 REF_T1,REF_T2
+    ds1 QRY_T_ALIAS REF_T2,REF_T3
+    ds2      QRY003 REF003,REF004
+    ds2      QRY004        REF003
+    ds2      QRY005 REF005,REF006
+    ds2      QRY006        REF005
+    ds2      QRY007        REF006
+    ds2      QRY008       MISSING
+    ds2      QRY009        REF007
+    ds2      QRY010        REF007
+    ds2      QRY011 REF008,REF009
+
+── ALIASES ─────────────────────────────────────────────────────────
+  QRY_ALIAS  ↔  REF_ALIAS_A
+  QRY_T_ALIAS  ↔  REF_T2
+
+── OUTPUT ──────────────────────────────────────────────────────────
+DATASET       QUERY    DUPLICATES  REF_MAPPED                   STATUS              ALIAS_NOTE
+    ds1      REF001        REF001      REF001             ID_CONFIRMED                       —
+    ds1      QRY001        REF002      REF002                   UNIQUE                       —
+    ds1   QRY_ALIAS   REF_ALIAS_A REF_ALIAS_A        RESOLVED_BY_ALIAS                       —
+    ds1      REF_T1 REF_T1,REF_T2      REF_T1           RESOLVED_BY_ID                       —
+    ds1 QRY_T_ALIAS REF_T2,REF_T3      REF_T2        RESOLVED_BY_ALIAS                       —
+    ds2      QRY003 REF003,REF004      REF004  INFERRED_BY_ELIMINATION query_not_in_alias_file
+    ds2      QRY004        REF003      REF003                   UNIQUE                       —
+    ds2      QRY005 REF005,REF006   AMBIGUOUS      AMBIGUOUS_ALL_TAKEN query_not_in_alias_file
+    ds2      QRY006        REF005      REF005                   UNIQUE                       —
+    ds2      QRY007        REF006      REF006                   UNIQUE                       —
+    ds2      QRY008       MISSING          NA                  MISSING                       —
+    ds2      QRY009        REF007      REF007    CONFLICT_KEPT[UNIQUE]                       —
+    ds2      QRY010        REF007          NA CONFLICT_DROPPED[UNIQUE]                       —
+    ds2      QRY011 REF008,REF009   AMBIGUOUS     AMBIGUOUS_UNRESOLVED query_not_in_alias_file
+
+── CHECKS ──────────────────────────────────────────────────────────
+  OK   REF001         status=ID_CONFIRMED                     ref=REF001
+  OK   QRY001         status=UNIQUE                           ref=REF002
+  OK   QRY_ALIAS      status=RESOLVED_BY_ALIAS                ref=REF_ALIAS_A
+  OK   REF_T1         status=RESOLVED_BY_ID                   ref=REF_T1
+  OK   QRY_T_ALIAS    status=RESOLVED_BY_ALIAS                ref=REF_T2
+  OK   QRY003         status=INFERRED_BY_ELIMINATION          ref=REF004
+  OK   QRY004         status=UNIQUE                           ref=REF003
+  OK   QRY005         status=AMBIGUOUS_ALL_TAKEN              ref=AMBIGUOUS
+  OK   QRY006         status=UNIQUE                           ref=REF005
+  OK   QRY007         status=UNIQUE                           ref=REF006
+  OK   QRY008         status=MISSING                          ref=NA
+  OK   QRY011         status=AMBIGUOUS_UNRESOLVED             ref=AMBIGUOUS
+  OK   QRY009+QRY010   1×CONFLICT_KEPT + 1×CONFLICT_DROPPED: yes
+
+  13/13 checks passed — all passed
+
+```
 
 
 
