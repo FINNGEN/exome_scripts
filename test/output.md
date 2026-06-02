@@ -1,0 +1,64 @@
+### Input
+
+| DATASET | QUERY | DUPLICATES |
+| --- | --- | --- |
+| ds1 | REF001 | REF001 |
+| ds1 | QRY001 | REF002 |
+| ds1 | QRY_ALIAS | REF_ALIAS_A |
+| ds1 | REF_T1 | REF_T1,REF_T2 |
+| ds1 | QRY_T_ALIAS | REF_T2,REF_T3 |
+| ds2 | QRY003 | REF003,REF004 |
+| ds2 | QRY004 | REF003 |
+| ds2 | QRY005 | REF005,REF006 |
+| ds2 | QRY006 | REF005 |
+| ds2 | QRY007 | REF006 |
+| ds2 | QRY008 | MISSING |
+| ds2 | QRY009 | REF007 |
+| ds2 | QRY010 | REF007 |
+| ds2 | QRY011 | REF008,REF009 |
+
+### Aliases
+
+| Group |
+| --- |
+| `QRY_ALIAS` ↔ `REF_ALIAS_A` |
+| `QRY_T_ALIAS` ↔ `REF_T2` |
+
+### Output
+
+| DATASET | QUERY | DUPLICATES | REF_MAPPED | STATUS | ALIAS_NOTE |
+| --- | --- | --- | --- | --- | --- |
+| ds1 | REF001 | REF001 | REF001 | ID_CONFIRMED | — |
+| ds1 | QRY001 | REF002 | REF002 | UNIQUE | — |
+| ds1 | QRY_ALIAS | REF_ALIAS_A | REF_ALIAS_A | RESOLVED_BY_ALIAS | — |
+| ds1 | REF_T1 | REF_T1,REF_T2 | REF_T1 | RESOLVED_BY_ID | — |
+| ds1 | QRY_T_ALIAS | REF_T2,REF_T3 | REF_T2 | RESOLVED_BY_ALIAS | — |
+| ds2 | QRY003 | REF003,REF004 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
+| ds2 | QRY004 | REF003 | REF003 | UNIQUE | — |
+| ds2 | QRY005 | REF005,REF006 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
+| ds2 | QRY006 | REF005 | REF005 | UNIQUE | — |
+| ds2 | QRY007 | REF006 | REF006 | UNIQUE | — |
+| ds2 | QRY008 | MISSING | NA | MISSING | — |
+| ds2 | QRY009 | REF007 | REF007 | CONFLICT_KEPT[UNIQUE] | — |
+| ds2 | QRY010 | REF007 | NA | CONFLICT_DROPPED[UNIQUE] | — |
+| ds2 | QRY011 | REF008,REF009 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
+
+### Checks
+
+| QUERY | STATUS | REF_MAPPED |  |
+| --- | --- | --- | --- |
+| REF001 | ID_CONFIRMED | REF001 | ✓ |
+| QRY001 | UNIQUE | REF002 | ✓ |
+| QRY_ALIAS | RESOLVED_BY_ALIAS | REF_ALIAS_A | ✓ |
+| REF_T1 | RESOLVED_BY_ID | REF_T1 | ✓ |
+| QRY_T_ALIAS | RESOLVED_BY_ALIAS | REF_T2 | ✓ |
+| QRY003 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| QRY004 | UNIQUE | REF003 | ✓ |
+| QRY005 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| QRY006 | UNIQUE | REF005 | ✓ |
+| QRY007 | UNIQUE | REF006 | ✓ |
+| QRY008 | MISSING | NA | ✓ |
+| QRY011 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| QRY009+QRY010 | 1×CONFLICT_KEPT + 1×CONFLICT_DROPPED | — | ✓ |
+
+**13/13 checks — all passed**

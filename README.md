@@ -6,12 +6,13 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ## Summary results
 
+<!-- BEGIN:data/FG_exome_resolved_stats.md -->
 ### Mapping Totals
 
 | GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MATCHED | 43204 | 624 | 7033 | 11955 | 23592 | 95.2% | samples with a final QRY→REF mapping in the output |
-| DROPPED | 1554 | 5 | 20 | 397 | 1132 | 3.4% | found by KING but excluded from final mapping |
+| MATCHED | 43200 | 624 | 7037 | 11845 | 23694 | 95.2% | samples with a final QRY→REF mapping in the output |
+| DROPPED | 1558 | 5 | 16 | 507 | 1030 | 3.4% | found by KING but excluded from final mapping |
 | NO MATCH | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
 | TOTAL | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
 
@@ -21,14 +22,13 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | MATCHED | ID_CONFIRMED | 28362 | 601 | 5937 | 0 | 21824 | 62.5% | single candidate; KING match confirmed by matching IDs |
 | MATCHED | RESOLVED_BY_ID | 58 | 6 | 31 | 0 | 21 | 0.1% | twins in ref; query ID matched one candidate |
-| MATCHED | RESOLVED_BY_ALIAS | 1883 | 0 | 1055 | 347 | 481 | 4.1% | twins in ref; candidates are known aliases of each other |
-| MATCHED | INFERRED_BY_ELIMINATION | 4 | 0 | 0 | 4 | 0 | 0.0% | twins in ref; all other candidates already claimed |
-| MATCHED | UNIQUE | 11526 | 0 | 1 | 11480 | 45 | 25.4% | single candidate; matched by genetics only |
-| MATCHED | CONFLICT_KEPT | 1371 | 17 | 9 | 124 | 1221 | 3.0% | contested ref ID; kept after priority tiebreak; 1371 ref IDs contested, avg 31.5 queries/ref |
-| DROPPED | CONFLICT_DROPPED | 1450 | 5 | 20 | 293 | 1132 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
-| DROPPED | AMBIGUOUS_UNRESOLVED | 100 | 0 | 0 | 100 | 0 | 0.2% | multiple ref candidates; no resolution possible |
-| DROPPED | AMBIGUOUS_ALL_TAKEN | 4 | 0 | 0 | 4 | 0 | 0.0% | multiple ref candidates; all already claimed |
+| MATCHED | RESOLVED_BY_ALIAS | 1529 | 0 | 1054 | 0 | 475 | 3.4% | twins in ref; candidates are known aliases of each other |
+| MATCHED | UNIQUE | 11880 | 0 | 2 | 11827 | 51 | 26.2% | single candidate; matched by genetics only |
+| MATCHED | CONFLICT_KEPT | 1371 | 17 | 13 | 18 | 1323 | 3.0% | contested ref ID; kept after priority tiebreak; 1371 ref IDs contested, avg 31.5 queries/ref |
+| DROPPED | CONFLICT_DROPPED | 1450 | 5 | 16 | 399 | 1030 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
+| DROPPED | AMBIGUOUS_UNRESOLVED | 108 | 0 | 0 | 108 | 0 | 0.2% | multiple ref candidates; no resolution possible |
 | NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
+<!-- END:data/FG_exome_resolved_stats.md -->
 
 ### Mapping flowchart
 
@@ -141,24 +141,23 @@ python scripts/resolve_mapping.py combined_summary.tsv [--out my_mapping.tsv] [-
 
 Handles two real-world complications: twins in the reference (one query matches multiple ref candidates) and true duplicates within a query cohort (multiple queries match the same ref ID).
 
-**Three passes:**
+**Two passes:**
 
 1. **Categorise** — each row classified independently:
    - Single candidate, IDs match → `ID_CONFIRMED` (genetic + ID agreement, strongest evidence)
    - Single candidate, IDs differ → `UNIQUE` (genetics only, the normal case)
    - Multiple candidates, query ID is one of them → `RESOLVED_BY_ID` (twins in ref; ID identifies the right one)
-   - Multiple candidates, no ID match → `AMBIGUOUS_UNRESOLVED`
+   - Multiple candidates, query is a known alias of one candidate → `RESOLVED_BY_ALIAS`
+   - Multiple candidates, no resolution → `AMBIGUOUS_UNRESOLVED`
 
-2. **Disambiguate by elimination** — for `AMBIGUOUS_UNRESOLVED` rows, candidates already claimed by resolved rows are removed; repeats until stable. One free candidate left → `INFERRED_BY_ELIMINATION`. Zero free candidates → `AMBIGUOUS_ALL_TAKEN`.
-
-3. **Surjectivity check** — each REF ID must appear at most once in the final mapping. Conflicts (multiple queries claiming the same ref) are broken by random draw for now (`CONFLICT_KEPT[orig]` / `CONFLICT_DROPPED[orig]`). TODO: replace with QC tiebreaker (concordance score, het-F, n_snps).
+2. **Surjectivity check** — each REF ID must appear at most once in the final mapping. Conflicts (multiple queries claiming the same ref) are broken by random draw for now (`CONFLICT_KEPT[orig]` / `CONFLICT_DROPPED[orig]`). TODO: replace with QC tiebreaker (concordance score, het-F, n_snps).
 
 **Output groups:**
 
 | Group | Statuses | Meaning |
 |-------|----------|---------|
-| **MATCHED** | `ID_CONFIRMED`, `RESOLVED_BY_ID`, `INFERRED_BY_ELIMINATION`, `UNIQUE`, `CONFLICT_KEPT[...]` | Has a final QRY→REF mapping in the output |
-| **DROPPED** | `CONFLICT_DROPPED[...]`, `AMBIGUOUS_UNRESOLVED`, `AMBIGUOUS_ALL_TAKEN` | Found by KING but excluded from final mapping |
+| **MATCHED** | `ID_CONFIRMED`, `RESOLVED_BY_ID`, `RESOLVED_BY_ALIAS`, `UNIQUE`, `CONFLICT_KEPT[...]` | Has a final QRY→REF mapping in the output |
+| **DROPPED** | `CONFLICT_DROPPED[...]`, `AMBIGUOUS_UNRESOLVED` | Found by KING but excluded from final mapping |
 | **NO MATCH** | `MISSING` | No KING match found |
 
 **Alias handling** — an optional tab-delimited file maps QRY IDs that are known aliases of REF IDs (one alias group per line, REF ID first). This is used solely to resolve QRY-side ambiguity: only the query is looked up in the alias file; REF candidates are treated as ground truth and never cross-referenced. A query in the alias file whose single candidate is listed as its alias → `RESOLVED_BY_ALIAS`; a query with multiple candidates where exactly one is in the query's alias group → also `RESOLVED_BY_ALIAS`. Alias IDs cannot appear in `REF_MAPPED`; a post-processing check enforces this.
@@ -169,69 +168,74 @@ Handles two real-world complications: twins in the reference (one query matches 
 python scripts/resolve_mapping.py --test
 ```
 
-The output below shows the built-in input, the alias groups used, and the resolved mapping for each row:
+The tables below show the built-in input, alias groups, resolved mapping, and check results (auto-updated by `scripts/resolve_mapping.py --test`):
 
-```
-====================================================================
-                    TEST MODE — built-in dataset                    
-====================================================================
+<!-- BEGIN:test/output.md -->
+### Input
 
-── INPUT ───────────────────────────────────────────────────────────
-DATASET       QUERY    DUPLICATES
-    ds1      REF001        REF001
-    ds1      QRY001        REF002
-    ds1   QRY_ALIAS   REF_ALIAS_A
-    ds1      REF_T1 REF_T1,REF_T2
-    ds1 QRY_T_ALIAS REF_T2,REF_T3
-    ds2      QRY003 REF003,REF004
-    ds2      QRY004        REF003
-    ds2      QRY005 REF005,REF006
-    ds2      QRY006        REF005
-    ds2      QRY007        REF006
-    ds2      QRY008       MISSING
-    ds2      QRY009        REF007
-    ds2      QRY010        REF007
-    ds2      QRY011 REF008,REF009
+| DATASET | QUERY | DUPLICATES |
+| --- | --- | --- |
+| ds1 | REF001 | REF001 |
+| ds1 | QRY001 | REF002 |
+| ds1 | QRY_ALIAS | REF_ALIAS_A |
+| ds1 | REF_T1 | REF_T1,REF_T2 |
+| ds1 | QRY_T_ALIAS | REF_T2,REF_T3 |
+| ds2 | QRY003 | REF003,REF004 |
+| ds2 | QRY004 | REF003 |
+| ds2 | QRY005 | REF005,REF006 |
+| ds2 | QRY006 | REF005 |
+| ds2 | QRY007 | REF006 |
+| ds2 | QRY008 | MISSING |
+| ds2 | QRY009 | REF007 |
+| ds2 | QRY010 | REF007 |
+| ds2 | QRY011 | REF008,REF009 |
 
-── ALIASES ─────────────────────────────────────────────────────────
-  QRY_ALIAS  ↔  REF_ALIAS_A
-  QRY_T_ALIAS  ↔  REF_T2
+### Aliases
 
-── OUTPUT ──────────────────────────────────────────────────────────
-DATASET       QUERY    DUPLICATES  REF_MAPPED                   STATUS              ALIAS_NOTE
-    ds1      REF001        REF001      REF001             ID_CONFIRMED                       —
-    ds1      QRY001        REF002      REF002                   UNIQUE                       —
-    ds1   QRY_ALIAS   REF_ALIAS_A REF_ALIAS_A        RESOLVED_BY_ALIAS                       —
-    ds1      REF_T1 REF_T1,REF_T2      REF_T1           RESOLVED_BY_ID                       —
-    ds1 QRY_T_ALIAS REF_T2,REF_T3      REF_T2        RESOLVED_BY_ALIAS                       —
-    ds2      QRY003 REF003,REF004      REF004  INFERRED_BY_ELIMINATION query_not_in_alias_file
-    ds2      QRY004        REF003      REF003                   UNIQUE                       —
-    ds2      QRY005 REF005,REF006   AMBIGUOUS      AMBIGUOUS_ALL_TAKEN query_not_in_alias_file
-    ds2      QRY006        REF005      REF005                   UNIQUE                       —
-    ds2      QRY007        REF006      REF006                   UNIQUE                       —
-    ds2      QRY008       MISSING          NA                  MISSING                       —
-    ds2      QRY009        REF007      REF007    CONFLICT_KEPT[UNIQUE]                       —
-    ds2      QRY010        REF007          NA CONFLICT_DROPPED[UNIQUE]                       —
-    ds2      QRY011 REF008,REF009   AMBIGUOUS     AMBIGUOUS_UNRESOLVED query_not_in_alias_file
+| Group |
+| --- |
+| `QRY_ALIAS` ↔ `REF_ALIAS_A` |
+| `QRY_T_ALIAS` ↔ `REF_T2` |
 
-── CHECKS ──────────────────────────────────────────────────────────
-  OK   REF001         status=ID_CONFIRMED                     ref=REF001
-  OK   QRY001         status=UNIQUE                           ref=REF002
-  OK   QRY_ALIAS      status=RESOLVED_BY_ALIAS                ref=REF_ALIAS_A
-  OK   REF_T1         status=RESOLVED_BY_ID                   ref=REF_T1
-  OK   QRY_T_ALIAS    status=RESOLVED_BY_ALIAS                ref=REF_T2
-  OK   QRY003         status=INFERRED_BY_ELIMINATION          ref=REF004
-  OK   QRY004         status=UNIQUE                           ref=REF003
-  OK   QRY005         status=AMBIGUOUS_ALL_TAKEN              ref=AMBIGUOUS
-  OK   QRY006         status=UNIQUE                           ref=REF005
-  OK   QRY007         status=UNIQUE                           ref=REF006
-  OK   QRY008         status=MISSING                          ref=NA
-  OK   QRY011         status=AMBIGUOUS_UNRESOLVED             ref=AMBIGUOUS
-  OK   QRY009+QRY010   1×CONFLICT_KEPT + 1×CONFLICT_DROPPED: yes
+### Output
 
-  13/13 checks passed — all passed
+| DATASET | QUERY | DUPLICATES | REF_MAPPED | STATUS | ALIAS_NOTE |
+| --- | --- | --- | --- | --- | --- |
+| ds1 | REF001 | REF001 | REF001 | ID_CONFIRMED | — |
+| ds1 | QRY001 | REF002 | REF002 | UNIQUE | — |
+| ds1 | QRY_ALIAS | REF_ALIAS_A | REF_ALIAS_A | RESOLVED_BY_ALIAS | — |
+| ds1 | REF_T1 | REF_T1,REF_T2 | REF_T1 | RESOLVED_BY_ID | — |
+| ds1 | QRY_T_ALIAS | REF_T2,REF_T3 | REF_T2 | RESOLVED_BY_ALIAS | — |
+| ds2 | QRY003 | REF003,REF004 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
+| ds2 | QRY004 | REF003 | REF003 | UNIQUE | — |
+| ds2 | QRY005 | REF005,REF006 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
+| ds2 | QRY006 | REF005 | REF005 | UNIQUE | — |
+| ds2 | QRY007 | REF006 | REF006 | UNIQUE | — |
+| ds2 | QRY008 | MISSING | NA | MISSING | — |
+| ds2 | QRY009 | REF007 | REF007 | CONFLICT_KEPT[UNIQUE] | — |
+| ds2 | QRY010 | REF007 | NA | CONFLICT_DROPPED[UNIQUE] | — |
+| ds2 | QRY011 | REF008,REF009 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
 
-```
+### Checks
+
+| QUERY | STATUS | REF_MAPPED |  |
+| --- | --- | --- | --- |
+| REF001 | ID_CONFIRMED | REF001 | ✓ |
+| QRY001 | UNIQUE | REF002 | ✓ |
+| QRY_ALIAS | RESOLVED_BY_ALIAS | REF_ALIAS_A | ✓ |
+| REF_T1 | RESOLVED_BY_ID | REF_T1 | ✓ |
+| QRY_T_ALIAS | RESOLVED_BY_ALIAS | REF_T2 | ✓ |
+| QRY003 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| QRY004 | UNIQUE | REF003 | ✓ |
+| QRY005 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| QRY006 | UNIQUE | REF005 | ✓ |
+| QRY007 | UNIQUE | REF006 | ✓ |
+| QRY008 | MISSING | NA | ✓ |
+| QRY011 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| QRY009+QRY010 | 1×CONFLICT_KEPT + 1×CONFLICT_DROPPED | — | ✓ |
+
+**13/13 checks — all passed**
+<!-- END:test/output.md -->
 
 
 
