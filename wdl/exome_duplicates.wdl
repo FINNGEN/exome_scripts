@@ -104,7 +104,6 @@ workflow exome_duplicates {
     input:
       summaries    = SummarizeKing.summary,
       plots        = SummarizeKing.plot,
-      snplists     = FilterSNPs.snplist,
       plink_prefix = plink_prefix,
       aliases      = aliases
   }
@@ -700,7 +699,6 @@ task GatherResults {
   input {
     Array[File] summaries
     Array[File] plots
-    Array[File] snplists
     String      plink_prefix
     File?       aliases
     String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:dup_scripts"
@@ -708,58 +706,27 @@ task GatherResults {
 
   command <<<
   set -euo pipefail
+  PREFIX="~{plink_prefix}_EXOME"
 
-  # ── 1. Combine per-dataset summaries into combined_summary.tsv ─────────
-  python3 << PYEOF
-import pandas as pd, os
+  # ── 1. Combine per-dataset summaries into combined_summary.tsv ──────────
+  mapfile -t summary_files < "~{write_lines(summaries)}"
+  # Write header once with DATASET column prepended
+  awk 'NR==1{print "DATASET\t" $0; exit}' "${summary_files[0]}" > "${PREFIX}_combined_summary.tsv"
+  # Append data rows from each dataset
+  for sf in "${summary_files[@]}"; do
+      dataset=$(basename "$sf" | sed 's/\.summary\.tsv$//' | sed 's/_vs_.*//')
+      awk -v ds="$dataset" 'NR>1{print ds "\t" $0}' "$sf"
+  done >> "${PREFIX}_combined_summary.tsv"
 
-summary_files = [l.strip() for l in open("~{write_lines(summaries)}") if l.strip()]
-snplist_files = [l.strip() for l in open("~{write_lines(snplists)}") if l.strip()]
-dfs, global_rows = [], []
+  # ── 2. Stack per-dataset concordance plots ──────────────────────────────
+  mapfile -t plot_files < "~{write_lines(plots)}"
+  convert -append "${plot_files[@]}" "${PREFIX}_concordance.png"
 
-for sf, sl in zip(summary_files, snplist_files):
-    dataset = os.path.basename(sf).replace(".summary.tsv", "").split("_vs_")[0]
-    df = pd.read_csv(sf, sep="\t")
-    df.insert(0, "DATASET", dataset)
-    dfs.append(df)
-    n_total     = len(df)
-    n_matched   = (df["DUPLICATES"] != "MISSING").sum()
-    n_ambiguous = df["DUPLICATES"].apply(lambda x: isinstance(x, str) and "," in x).sum()
-    n_snps      = sum(1 for _ in open(sl))
-    global_rows.append({
-        "DATASET": dataset, "TOTAL_QUERY": n_total,
-        "N_MATCHED": n_matched, "PCT_MATCHED": f"{n_matched/n_total*100:.1f}%",
-        "N_AMBIGUOUS": n_ambiguous, "N_SNPS": n_snps,
-    })
-
-pd.concat(dfs, ignore_index=True).to_csv(
-    "~{plink_prefix}_EXOME_combined_summary.tsv", sep="\t", index=False)
-global_df = pd.DataFrame(global_rows)
-global_df.to_csv("~{plink_prefix}_EXOME_global_summary.tsv", sep="\t", index=False)
-print(global_df.to_string(index=False))
-PYEOF
-
-  # ── 2. Stack per-dataset concordance plots ─────────────────────────────
-  python3 << PYEOF
-import matplotlib; matplotlib.use("Agg")
-import matplotlib.pyplot as plt, matplotlib.image as mpimg, os
-
-plot_files = [l.strip() for l in open("~{write_lines(plots)}") if l.strip()]
-fig, axes = plt.subplots(len(plot_files), 1, figsize=(14, 5 * len(plot_files)))
-if len(plot_files) == 1: axes = [axes]
-for ax, pf in zip(axes, plot_files):
-    ax.imshow(mpimg.imread(pf)); ax.axis("off")
-    ax.set_title(os.path.basename(pf).replace("_concordance.png", ""), fontsize=12, pad=8)
-plt.tight_layout()
-plt.savefig("~{plink_prefix}_EXOME_concordance.png", dpi=150, bbox_inches="tight")
-print(f"Combined {len(plot_files)} plots")
-PYEOF
-
-  # ── 3. Resolve mapping, stats, and flowchart ───────────────────────────
+  # ── 3. Resolve mapping, stats, and flowchart ────────────────────────────
   python3 /scripts/resolve_mapping.py \
-    ~{plink_prefix}_EXOME_combined_summary.tsv \
+    "${PREFIX}_combined_summary.tsv" \
     ~{if defined(aliases) then "--aliases " + select_first([aliases]) else ""} \
-    --out ~{plink_prefix}_EXOME_resolved.tsv
+    --out "${PREFIX}_resolved.tsv"
 
   >>>
 

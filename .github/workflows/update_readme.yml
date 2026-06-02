@@ -1,0 +1,30 @@
+name: Update README
+
+on:
+  push:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Inject data/test files into README
+        run: python scripts/update_readme.py
+
+      - name: Commit if README changed
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git diff --cached --quiet || git commit -m "docs: auto-update README from data/ and test/ [skip ci]"
+          git push
