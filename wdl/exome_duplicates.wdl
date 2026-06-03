@@ -109,22 +109,12 @@ workflow exome_duplicates {
   }
 
   output {
-    Array[File]        subset_vcfs            = ConcatVCF.subset_vcf
-    Array[File]        subset_tbis            = ConcatVCF.subset_tbi
-    Array[File]        snplists               = FilterSNPs.snplist
-    Array[File]        hq_snplists            = FilterSNPs.hq_snplist
-    Array[File]        summary                = SummarizeKing.summary
-    Array[File]        concordance_plots      = SummarizeKing.plot
-    Array[File]        duplicates_con         = KingShards.duplicates_con
-    Array[File]        excluded_samples_query = PrepQuery.excluded_samples
-    Array[File]        excluded_samples_ref   = PrepRef.excluded_samples
     File               combined_summary        = GatherResults.combined_summary
     File               combined_plot          = GatherResults.combined_plot
     File               resolved_mapping       = GatherResults.resolved_mapping
     File               resolved_stats_tsv     = GatherResults.resolved_stats_tsv
     File               resolved_stats_md      = GatherResults.resolved_stats_md
     File               resolved_flowchart     = GatherResults.resolved_flowchart
-
   }
 }
 

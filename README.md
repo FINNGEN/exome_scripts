@@ -438,51 +438,56 @@ java -jar cromwell.jar run wdl/single_file_qc.wdl -i inputs.json
 
 #### daly_qc.wdl
 
-**Simple FILTER-based QC workflow**
+**FILTER-based QC with header annotation and sample renaming**
 
 **What it does:**
 
-1. Computes statistics on original VCFs (variant counts per chromosome)
-2. Annotates VCF headers with FILTER definitions (if missing)
-3. Filters variants in parallel by genomic regions
-4. Removes variants matching a filter expression (default: `FILTER~"NO_HQ_GENOTYPES"`)
-5. Computes statistics on filtered VCFs
-6. Merges filtered chromosomes
-7. Annotates variant IDs
-8. Creates summary statistics showing variant counts and drop rates per chromosome
+For each input VCF (scatter over vcf_list):
 
-**Use case:**
+1. **ComputeStats**: Reads the remote index only — gets chrom, variant count, sample count without downloading the VCF.
+2. **AnnotateAndRename**: Fetches the VCF header, injects any missing FILTER definitions (`NO_HQ_GENOTYPES`, `ExcessHet`, `LowQual`, `EXCESS_ALLELES`, `OUTSIDE_OF_TARGETS`), builds a `SAMPLE_ID → FINNGENID_finngen` rename map from the `rename_file`, resolves duplicate new IDs with `_dup`/`_dup2` suffixes, and applies header + rename in a single `bcftools reheader` pass (fast — body is copied verbatim).
+3. **ParallelFilter**: Splits the chromosome into `cpu_count × chunk_multiplier` equal position windows, filters each chunk in parallel with GNU parallel (`bcftools view -e filter_expression`), annotates variant IDs as `CHROM_POS_REF_ALT`, and concatenates.
+4. **ComputeStats** (again): Variant counts on the filtered VCF.
+5. **ValidateFiltering**: Checks no variants matching the filter expression remain, verifies `CHROM_POS_REF_ALT` ID format, and reports rename counts.
 
-Designed for filtering variants that have already been flagged in the FILTER column. Simpler than the other workflows - just removes flagged variants without genotype-level filtering.
+Then globally:
+
+6. **SummaryStats**: Per-chromosome variant counts + drop rates, derives output root name from input filenames.
+7. **SortAndMerge**: Concatenates per-chromosome filtered VCFs (in vcf_list order) into `{root_name}.QC_ANNOTATED.vcf.gz`.
 
 **Inputs:**
 
 ```json
 {
-  "vcf_list": "path/to/vcf_list.txt",
-  "filter_expression": "FILTER~\"NO_HQ_GENOTYPES\"",
-  "cpu_count": 8
+  "daly_qc.vcf_list":         "path/to/vcf_list.txt",
+  "daly_qc.rename_file":      "path/to/rename.tsv",
+  "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
+  "daly_qc.cpu_count":        8,
+  "daly_qc.vcf_max_gb":       25,
+  "daly_qc.chunk_multiplier": 3
 }
 ```
 
+`rename_file` is a TSV with columns: `FINNGENID_finngen(1)`, `FINNGENID_biobank(2)`, `SAMPLE_ID(3)` — samples are renamed from col 3 to col 1. `filter_expression`, `vcf_max_gb`, and `chunk_multiplier` are optional.
+
 **Outputs:**
 
-- `filtered_vcfs[]`: Per-chromosome filtered VCFs
-- `filtered_vcf_tbis[]`: Index files
-- `original_stats[]`: Variant counts before filtering
+- `original_stats[]`: Variant/sample counts before filtering (index-only, fast)
 - `filtered_stats[]`: Variant counts after filtering
-- `merged_vcf`: Merged output
-- `merged_vcf_tbi`: Merged index
-- `summary_table`: TSV with chromosome-level and total drop rates
+- `validation_reports[]`: Per-VCF filter check + rename summary
+- `merged_vcf`: `{root_name}.QC_ANNOTATED.vcf.gz` — all chromosomes merged, samples renamed to FinnGen IDs
+- `merged_vcf_tbi`: Index for merged VCF
+- `report`: `{root_name}.QC_ANNOTATED.report.txt` — per-chromosome and total drop rates
 
 **How to run:**
 
 ```bash
 cat > inputs.json << EOF
 {
-  "daly_qc.vcf_list": "vcf_files.txt",
-  "daly_qc.filter_expression": "FILTER~\\\"NO_HQ_GENOTYPES\\\"",
-  "daly_qc.cpu_count": 8
+  "daly_qc.vcf_list":         "vcf_files.txt",
+  "daly_qc.rename_file":      "rename.tsv",
+  "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
+  "daly_qc.cpu_count":        8
 }
 EOF
 
