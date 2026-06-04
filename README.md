@@ -11,8 +11,8 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 | GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MATCHED | 43302 | 619 | 7031 | 12234 | 23418 | 95.4% | samples with a final QRY→REF mapping in the output |
-| DROPPED | 1456 | 10 | 22 | 118 | 1306 | 3.2% | found by KING but excluded from final mapping |
+| MATCHED | 43302 | 619 | 7031 | 12233 | 23419 | 95.4% | samples with a final QRY→REF mapping in the output |
+| DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | found by KING but excluded from final mapping |
 | NO MATCH | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
 | TOTAL | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
 
@@ -20,12 +20,12 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 | GROUP | STATUS | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MATCHED | ID_CONFIRMED | 40178 | 601 | 5937 | 11816 | 21824 | 88.5% | single candidate; KING match confirmed by matching IDs |
+| MATCHED | ID_CONFIRMED | 40189 | 601 | 5937 | 11816 | 21835 | 88.5% | single candidate; KING match confirmed by matching IDs |
 | MATCHED | RESOLVED_BY_ID | 160 | 6 | 31 | 102 | 21 | 0.4% | twins in ref; query ID matched one candidate |
-| MATCHED | RESOLVED_BY_ALIAS | 1523 | 0 | 1054 | 0 | 469 | 3.4% | twins in ref; candidates are known aliases of each other |
-| MATCHED | UNIQUE | 64 | 0 | 2 | 11 | 51 | 0.1% | single candidate; matched by genetics only |
-| MATCHED | CONFLICT_KEPT | 1377 | 12 | 7 | 305 | 1053 | 3.0% | contested ref ID; kept after priority tiebreak; 1377 ref IDs contested, avg 31.4 queries/ref |
-| DROPPED | CONFLICT_DROPPED | 1456 | 10 | 22 | 118 | 1306 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
+| MATCHED | RESOLVED_BY_ALIAS | 1524 | 0 | 1054 | 0 | 470 | 3.4% | twins in ref; candidates are known aliases of each other |
+| MATCHED | UNIQUE | 52 | 0 | 2 | 11 | 39 | 0.1% | single candidate; matched by genetics only |
+| MATCHED | CONFLICT_KEPT | 1377 | 12 | 7 | 304 | 1054 | 3.0% | contested ref ID; kept after priority tiebreak; 1377 ref IDs contested, avg 31.4 queries/ref |
+| DROPPED | CONFLICT_DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
 | NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
 <!-- END:data/FG_EXOME_resolved_stats.md -->
 
@@ -175,8 +175,10 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 | DATASET | QUERY | DUPLICATES |
 | --- | --- | --- |
 | ds1 | REF001 | REF001 |
+| ds1 | REF010_v2 | REF010 |
 | ds1 | QRY001 | REF002 |
 | ds1 | QRY_ALIAS | REF_ALIAS_A |
+| ds1 | QRY_ALIAS_B_v2 | REF_ALIAS_B |
 | ds1 | REF_T1 | REF_T1,REF_T2 |
 | ds1 | QRY_T_ALIAS | REF_T2,REF_T3 |
 | ds2 | QRY003 | REF003,REF004 |
@@ -194,46 +196,51 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 | Group |
 | --- |
 | `QRY_ALIAS` ↔ `REF_ALIAS_A` |
+| `QRY_ALIAS_B` ↔ `REF_ALIAS_B` |
 | `QRY_T_ALIAS` ↔ `REF_T2` |
 
 ### Output
 
 | DATASET | QUERY | DUPLICATES | REF_MAPPED | STATUS | ALIAS_NOTE |
 | --- | --- | --- | --- | --- | --- |
-| ds1 | REF001 | REF001 | REF001 | ID_CONFIRMED | — |
-| ds1 | QRY001 | REF002 | REF002 | UNIQUE | — |
-| ds1 | QRY_ALIAS | REF_ALIAS_A | REF_ALIAS_A | RESOLVED_BY_ALIAS | — |
-| ds1 | REF_T1 | REF_T1,REF_T2 | REF_T1 | RESOLVED_BY_ID | — |
-| ds1 | QRY_T_ALIAS | REF_T2,REF_T3 | REF_T2 | RESOLVED_BY_ALIAS | — |
-| ds2 | QRY003 | REF003,REF004 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
-| ds2 | QRY004 | REF003 | REF003 | UNIQUE | — |
-| ds2 | QRY005 | REF005,REF006 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
-| ds2 | QRY006 | REF005 | REF005 | UNIQUE | — |
-| ds2 | QRY007 | REF006 | REF006 | UNIQUE | — |
-| ds2 | QRY008 | MISSING | NA | MISSING | — |
+| ds1 | REF001 | REF001 | REF001 | ID_CONFIRMED[ID_CONFIRMED] | — |
+| ds1 | REF010_v2 | REF010 | REF010 | ID_CONFIRMED[ID_CONFIRMED] | — |
+| ds1 | QRY001 | REF002 | REF002 | UNIQUE[UNIQUE] | — |
+| ds1 | QRY_ALIAS | REF_ALIAS_A | REF_ALIAS_A | RESOLVED_BY_ALIAS[RESOLVED_BY_ALIAS] | — |
+| ds1 | QRY_ALIAS_B_v2 | REF_ALIAS_B | REF_ALIAS_B | RESOLVED_BY_ALIAS[RESOLVED_BY_ALIAS] | — |
+| ds1 | REF_T1 | REF_T1,REF_T2 | REF_T1 | RESOLVED_BY_ID[RESOLVED_BY_ID] | — |
+| ds1 | QRY_T_ALIAS | REF_T2,REF_T3 | REF_T2 | RESOLVED_BY_ALIAS[RESOLVED_BY_ALIAS] | — |
+| ds2 | QRY003 | REF003,REF004 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | query_not_in_alias_file |
+| ds2 | QRY004 | REF003 | REF003 | UNIQUE[UNIQUE] | — |
+| ds2 | QRY005 | REF005,REF006 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | query_not_in_alias_file |
+| ds2 | QRY006 | REF005 | REF005 | UNIQUE[UNIQUE] | — |
+| ds2 | QRY007 | REF006 | REF006 | UNIQUE[UNIQUE] | — |
+| ds2 | QRY008 | MISSING | NA | MISSING[MISSING] | — |
 | ds2 | QRY009 | REF007 | REF007 | CONFLICT_KEPT[UNIQUE] | — |
 | ds2 | QRY010 | REF007 | NA | CONFLICT_DROPPED[UNIQUE] | — |
-| ds2 | QRY011 | REF008,REF009 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED | query_not_in_alias_file |
+| ds2 | QRY011 | REF008,REF009 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | query_not_in_alias_file |
 
 ### Checks
 
 | QUERY | STATUS | REF_MAPPED |  |
 | --- | --- | --- | --- |
-| REF001 | ID_CONFIRMED | REF001 | ✓ |
-| QRY001 | UNIQUE | REF002 | ✓ |
-| QRY_ALIAS | RESOLVED_BY_ALIAS | REF_ALIAS_A | ✓ |
-| REF_T1 | RESOLVED_BY_ID | REF_T1 | ✓ |
-| QRY_T_ALIAS | RESOLVED_BY_ALIAS | REF_T2 | ✓ |
-| QRY003 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
-| QRY004 | UNIQUE | REF003 | ✓ |
-| QRY005 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
-| QRY006 | UNIQUE | REF005 | ✓ |
-| QRY007 | UNIQUE | REF006 | ✓ |
-| QRY008 | MISSING | NA | ✓ |
-| QRY011 | AMBIGUOUS_UNRESOLVED | AMBIGUOUS | ✓ |
+| REF001 | ID_CONFIRMED[ID_CONFIRMED] | REF001 | ✓ |
+| REF010_v2 | ID_CONFIRMED[ID_CONFIRMED] | REF010 | ✓ |
+| QRY001 | UNIQUE[UNIQUE] | REF002 | ✓ |
+| QRY_ALIAS | RESOLVED_BY_ALIAS[RESOLVED_BY_ALIAS] | REF_ALIAS_A | ✓ |
+| QRY_ALIAS_B_v2 | RESOLVED_BY_ALIAS[RESOLVED_BY_ALIAS] | REF_ALIAS_B | ✓ |
+| REF_T1 | RESOLVED_BY_ID[RESOLVED_BY_ID] | REF_T1 | ✓ |
+| QRY_T_ALIAS | RESOLVED_BY_ALIAS[RESOLVED_BY_ALIAS] | REF_T2 | ✓ |
+| QRY003 | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | AMBIGUOUS | ✓ |
+| QRY004 | UNIQUE[UNIQUE] | REF003 | ✓ |
+| QRY005 | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | AMBIGUOUS | ✓ |
+| QRY006 | UNIQUE[UNIQUE] | REF005 | ✓ |
+| QRY007 | UNIQUE[UNIQUE] | REF006 | ✓ |
+| QRY008 | MISSING[MISSING] | NA | ✓ |
+| QRY011 | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | AMBIGUOUS | ✓ |
 | QRY009+QRY010 | 1×CONFLICT_KEPT + 1×CONFLICT_DROPPED | — | ✓ |
 
-**13/13 checks — all passed**
+**15/15 checks — all passed**
 <!-- END:test/output.md -->
 
 
