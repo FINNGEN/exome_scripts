@@ -143,7 +143,7 @@ Handles two real-world complications: twins in the reference (one query matches 
 **Two passes:**
 
 1. **Categorise** — each row classified independently:
-   - Single candidate, IDs match → `ID_CONFIRMED` (genetic + ID agreement, strongest evidence)
+   - Single candidate, query ID starts with the ref ID → `ID_CONFIRMED` (genetic + ID agreement, strongest evidence); handles exact matches and suffix variants (e.g. `FGXXXXX_dup1` → ref `FGXXXXX`) without assuming a specific suffix format
    - Single candidate, IDs differ → `UNIQUE` (genetics only, the normal case)
    - Multiple candidates, query ID is one of them → `RESOLVED_BY_ID` (twins in ref; ID identifies the right one)
    - Multiple candidates, query is a known alias of one candidate → `RESOLVED_BY_ALIAS`
@@ -159,7 +159,7 @@ Handles two real-world complications: twins in the reference (one query matches 
 | **DROPPED** | `CONFLICT_DROPPED[...]`, `AMBIGUOUS_UNRESOLVED` | Found by KING but excluded from final mapping |
 | **NO MATCH** | `MISSING` | No KING match found |
 
-**Alias handling** — an optional tab-delimited file maps QRY IDs that are known aliases of REF IDs (one alias group per line, REF ID first). This is used solely to resolve QRY-side ambiguity: only the query is looked up in the alias file; REF candidates are treated as ground truth and never cross-referenced. A query in the alias file whose single candidate is listed as its alias → `RESOLVED_BY_ALIAS`; a query with multiple candidates where exactly one is in the query's alias group → also `RESOLVED_BY_ALIAS`. Alias IDs cannot appear in `REF_MAPPED`; a post-processing check enforces this.
+**Alias handling** — an optional tab-delimited file lists known alias groups (one group per line, space/tab-separated). For each REF candidate, the script checks whether the query starts with any member of that candidate's alias group. This naturally handles suffix variants (e.g. `FGXXXXX_dup1`) without requiring them to be registered in the alias file. A single matching candidate → `RESOLVED_BY_ALIAS`; multiple matching candidates → `AMBIGUOUS_UNRESOLVED`. Alias IDs cannot appear in `REF_MAPPED`; a post-processing check enforces this.
 
 **Test mode** — a self-contained test dataset covering every status category can be run without any input files:
 

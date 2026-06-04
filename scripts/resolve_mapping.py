@@ -20,7 +20,7 @@ TEST_ALIASES = TEST_DIR / "aliases.tsv"
 
 RESOLVED = {"ID_CONFIRMED","RESOLVED_BY_ID","RESOLVED_BY_ALIAS","UNIQUE"}
 CONFLICT_PRIORITY = {"ID_CONFIRMED":0,"RESOLVED_BY_ALIAS":1,"RESOLVED_BY_ID":2,"UNIQUE":3}
-DEFAULT_ALIASES = "/mnt/disks/data/samples/exclusions/finngen_R12_duplicate_list.txt"
+DEFAULT_ALIASES = "/mnt/disks/data/samples/exclusions/finngen_R14_duplicate_list.txt"
 
 SUMMARY_GROUPS = [
     ("MATCHED", "samples with a final QRY→REF mapping in the output", [
@@ -68,22 +68,16 @@ def _parse_alias_lines(lines, label=""):
 def _alias_resolve(query, candidates, ag):
     """Return (ref_candidate | None, note).
 
-    Alias handling is intentionally QRY-only: only the QUERY is looked up in
-    the alias file.  REF candidates are never cross-referenced — they are the
-    authoritative identities.  The question asked is purely:
-        'which of these REF candidates is listed as a known alias of this query?'
+    For each REF candidate, check whether the query starts with any member of
+    that candidate's alias group.  This handles ID variants with arbitrary
+    suffixes without assuming a specific suffix format.
     """
-    alias_group = ag.get(query)
-    if alias_group is None:
-        return None, "query_not_in_alias_file"
-
-    # alias_group is the frozenset of all IDs known to be the same person as query
-    m = [c for c in candidates if c in alias_group]  # REF candidates that match
+    m = [c for c in candidates if any(query.startswith(a) for a in ag.get(c, frozenset()))]
 
     if len(m) == 1:
         return m[0], ""
     if len(m) == 0:
-        return None, "no_candidates_in_alias_group"
+        return None, "query_not_in_alias_file"
     return None, f"{len(m)}_candidates_in_alias_group"
 
 
@@ -121,7 +115,7 @@ def initial_categorise(df, ag=None):
             if c and c not in seen: cands.append(c); seen.add(c)
         if len(cands) == 1:
             ref = cands[0]
-            if query == ref:
+            if query.startswith(ref):
                 records.append(_row(dataset, query, ref, raw, "ID_CONFIRMED"))
             elif ag:
                 resolved, _ = _alias_resolve(query, cands, ag)
@@ -155,6 +149,7 @@ def check_surjectivity(result, rng):
             orig = result.at[idx, "STATUS"]
             if idx == winner: result.at[idx, "STATUS"] = f"CONFLICT_KEPT[{orig}]"
             else:             result.at[idx, "STATUS"] = f"CONFLICT_DROPPED[{orig}]"; result.at[idx, "REF_MAPPED"] = "NA"
+    result["STATUS"] = result["STATUS"].apply(lambda s: s if "[" in s else f"{s}[{s}]")
     return result
 
 
@@ -276,7 +271,7 @@ def make_flowchart(df_init, df_final, outpath):
     s1 = _bands(
         ("miss",  c_miss,  C_GR, "#757575", f"MISSING ({c_miss:,})"),
         ("ambig", c_ambig, C_YL, "#f9a825", f"AMBIG_UNRESOLVED\n({c_ambig:,})"),
-        ("uniq",  c_uniq,  C_GL, C_GD,      f"UNIQUE ({c_uniq:,})"),
+        ("uniq",  c_uniq,  C_YL, "#f9a825",  f"UNIQUE ({c_uniq:,})"),
         ("ral",   c_ral,   C_GL, C_GD,      f"RESOLVED_BY_ALIAS\n({c_ral:,})"),
         ("rid",   c_rid,   C_GL, C_GD,      f"RESOLVED_BY_ID\n({c_rid:,})"),
         ("id",    c_id,    C_GL, C_GD,      f"ID_CONFIRMED\n({c_id:,})"),
@@ -313,20 +308,22 @@ def make_flowchart(df_init, df_final, outpath):
             if cnt:
                 flows_01.append((f"ds_{ds}", k, cnt, fc))
 
-    # Direct-resolved bands split proportionally into cdrop / ckept / clean.
-    # Process s1 bands bottom-to-top (uniq → id), within each: cdrop first, clean last.
-    n_dir = c_id + c_rid + c_ral + c_uniq
-    def _dsplit(c):
-        if n_dir == 0 or c == 0: return 0, 0, 0
-        dr = round(c * c_cdrop / n_dir); kp = round(c * c_ckept / n_dir)
-        return dr, kp, max(c - dr - kp, 0)
+    # flows_12: use actual per-source counts from df_final STATUS bracket notation
+    # e.g. CONFLICT_DROPPED[UNIQUE] tells us exactly which s1 band fed each conflict.
+    fvc = df_final["STATUS"].value_counts()
+    S1_INIT = {"id": "ID_CONFIRMED", "rid": "RESOLVED_BY_ID",
+               "ral": "RESOLVED_BY_ALIAS", "uniq": "UNIQUE"}
 
     flows_12 = []
     for k, cnt in [("uniq", c_uniq), ("ral", c_ral), ("rid", c_rid), ("id", c_id)]:
-        dr, kp, cl = _dsplit(cnt)
-        if dr: flows_12.append((k, "cdrop", dr, C_SL))
-        if kp: flows_12.append((k, "ckept", kp, C_GM))
-        if cl: flows_12.append((k, "clean", cl, C_GL))
+        init_pfx = S1_INIT[k]
+        cl_col   = C_YL if k == "uniq" else C_GL
+        dr = sum(v for s, v in fvc.items() if s.startswith("CONFLICT_DROPPED") and f"[{init_pfx}]" in s)
+        kp = sum(v for s, v in fvc.items() if s.startswith("CONFLICT_KEPT")    and f"[{init_pfx}]" in s)
+        cl = cnt - dr - kp
+        if dr:      flows_12.append((k, "cdrop", dr, C_SL))
+        if kp:      flows_12.append((k, "ckept", kp, C_GM))
+        if cl > 0:  flows_12.append((k, "clean", cl, cl_col))
     if c_ambr: flows_12.append(("ambig", "ambr",  c_ambr, C_RL))
     if c_miss: flows_12.append(("miss",  "miss2", c_miss, C_GR))
 
@@ -541,9 +538,11 @@ def main():
         # ── 4. CHECKS ────────────────────────────────────────────────────
         print(f"\n{'── CHECKS ':─<{W}}")
         expected = {
-            "REF001":     ("ID_CONFIRMED",            "REF001"),
-            "QRY001":     ("UNIQUE",                  "REF002"),
-            "QRY_ALIAS":  ("RESOLVED_BY_ALIAS",       "REF_ALIAS_A"),
+            "REF001":         ("ID_CONFIRMED",      "REF001"),
+            "REF010_v2":      ("ID_CONFIRMED",      "REF010"),      # startswith: REF010_v2 → REF010
+            "QRY001":         ("UNIQUE",            "REF002"),
+            "QRY_ALIAS":      ("RESOLVED_BY_ALIAS", "REF_ALIAS_A"),
+            "QRY_ALIAS_B_v2": ("RESOLVED_BY_ALIAS", "REF_ALIAS_B"), # alias via startswith
             "REF_T1":     ("RESOLVED_BY_ID",          "REF_T1"),
             "QRY_T_ALIAS":("RESOLVED_BY_ALIAS",       "REF_T2"),
             "QRY003":     ("AMBIGUOUS_UNRESOLVED",     "AMBIGUOUS"),

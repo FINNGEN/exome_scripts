@@ -688,7 +688,7 @@ task GatherResults {
     Array[File] plots
     String      plink_prefix
     File?       aliases
-    String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:dup_scripts"
+    String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:dup_scripts.2"
   }
 
   command <<<
