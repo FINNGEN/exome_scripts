@@ -6,7 +6,7 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ## Summary results
 
-<!-- BEGIN:data/FG_exome_resolved_stats.md -->
+<!-- BEGIN:data/FG_EXOME_resolved_stats.md -->
 ## Mapping Totals
 
 | GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
@@ -28,11 +28,11 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 | DROPPED | CONFLICT_DROPPED | 1450 | 5 | 16 | 399 | 1030 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
 | DROPPED | AMBIGUOUS_UNRESOLVED | 108 | 0 | 0 | 108 | 0 | 0.2% | multiple ref candidates; no resolution possible |
 | NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
-<!-- END:data/FG_exome_resolved_stats.md -->
+<!-- END:data/FG_EXOME_resolved_stats.md -->
 
 ### Mapping flowchart
 
-![Mapping flowchart](data/FG_exome_resolved_flowchart.png)
+![Mapping flowchart](data/FG_EXOME_resolved_flowchart.png)
 
 
 

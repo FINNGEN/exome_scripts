@@ -219,14 +219,11 @@ task FilterVCF {
   VCF="~{vcf}"
   CPU=~{cpu}
 
-  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-
   awk '{ print "chr" $1 "\t" $2 }' "$SNPLIST" | sort -k1,1V -k2,2n > positions.txt
-
   awk '$1 != prev { if (prev) print prev "\t" (lo-1) "\t" hi; prev=$1; lo=$2; hi=$2 }
        { if ($2<lo) lo=$2; if ($2>hi) hi=$2 }
        END { if (prev) print prev "\t" (lo-1) "\t" hi }' positions.txt > regions.bed
-
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
   bcftools view \
       --regions-file  regions.bed \
       --targets-file  positions.txt \
