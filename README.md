@@ -311,6 +311,7 @@ This repository contains WDL (Workflow Description Language) workflows for proce
 | `wes_chrom.wdl` | **Multi-chromosome parallel filtering** | Per-chromosome VCFs (exome or targeted sequencing) |
 | `single_file_qc.wdl` | **Whole genome filtering** | Single whole-genome VCF files (splits by chromosome internally) |
 | `daly_qc.wdl` | **Simple filter-based QC** | Any VCF with FILTER flags to remove |
+| `exome_rename.wdl` | **Sample subsetting and renaming** | QC-annotated VCFs + resolved mapping from `exome_duplicates.wdl` |
 
 ---
 
@@ -499,6 +500,48 @@ EOF
 
 java -jar cromwell.jar run wdl/daly_qc.wdl -i inputs.json
 ```
+
+---
+
+#### exome_rename.wdl
+
+**Sample subsetting and renaming using the QRY→REF mapping from `exome_duplicates.wdl`**
+
+**What it does:**
+
+For each dataset × chromosome, streams the QC-annotated VCF from GCS in size-based chunks, subsets to matched samples, and renames sample IDs from query IDs to FinnGen IDs. Outputs one VCF per dataset × chromosome.
+
+```
+QueryChromPositions[C]   one task per chrom — queries variant positions
+                         for all datasets in parallel (output is cached)
+        │
+BuildAllRegions          single task — derives size-based chunk regions
+                         per dataset × chrom from position files
+        │
+SubsetChunk[D×C×chunks]  scatter — streams one genomic chunk from GCS,
+                         subsets to matched samples, renames to FinnGen IDs
+        │
+ConcatChromVCF[D×C]      scatter — selects matching chunks and concatenates
+                         into one VCF per dataset + chrom
+```
+
+**Inputs:**
+
+```json
+{
+  "exome_rename.resolved_mapping": "gs://bucket/FG_EXOME_resolved.tsv",
+  "exome_rename.vcf_pairs":        [["BOTNIA", "gs://bucket/BOTNIA.QC_ANNOTATED.vcf.gz"], ...],
+  "exome_rename.chunk_mb":         500,
+  "exome_rename.suffix":           "fg_ids"
+}
+```
+
+`resolved_mapping` is the `_resolved.tsv` output from `exome_duplicates.wdl` — only rows with a non-NA, non-AMBIGUOUS `REF_MAPPED` are used. `vcf_pairs` defaults to the four project datasets if omitted.
+
+**Outputs:**
+
+- `chrom_vcfs[]`: One VCF per dataset × chromosome, samples renamed to FinnGen IDs, filename pattern `{base}.QC_ANNOTATED_{suffix}_{chrom}.vcf.gz`
+- `chrom_tbis[]`: Corresponding index files
 
 ---
 

@@ -220,24 +220,31 @@ task SubsetChunk {
     $3==ds && $2!="NA" && $2!="AMBIGUOUS" && $2!="" {print $1"\t"$2}
   ' ~{resolved_mapping} > mapping.tsv
 
-  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-
+  export HTS_HTTP_VERSION=1.1
   cut -f1 mapping.tsv > sample_list.txt
 
-  # Stream from GCS with fresh token
-  bcftools view -r "~{region}" --samples-file sample_list.txt --force-samples --threads ~{cpu} -Oz -o subset.vcf.gz "~{vcf}"
+  success=0
+  for attempt in 1 2 3; do
+    export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+    rm -f subset.vcf.gz
+    if bcftools view -r "~{region}" -t "~{region}" --samples-file sample_list.txt --force-samples --threads ~{cpu} -Oz -o subset.vcf.gz "~{vcf}"; then
+      success=1
+      break
+    fi
+    echo "Attempt $attempt failed for ~{region}" >&2
+    [[ $attempt -lt 3 ]] && sleep 15
+  done
+  [[ $success -eq 1 ]] || { echo "All 3 attempts failed for ~{region}" >&2; exit 1; }
 
   # Reheader locally — no GCS, no token risk
   bcftools reheader --samples mapping.tsv --output "~{out}" subset.vcf.gz
   rm subset.vcf.gz
-  bcftools index -t --threads ~{cpu} "~{out}"
 
-  echo "DONE ~{out} variants=$(bcftools index -n ~{out}) samples=$(bcftools query -l ~{out} | wc -l)"
+  echo "DONE ~{out} samples=$(bcftools query -l ~{out} | wc -l)"
   >>>
 
   output {
     File out_vcf = out
-    File out_tbi = out + ".tbi"
   }
 
   runtime {
@@ -260,7 +267,7 @@ task ConcatChromVCF {
     String        chrom
     String        suffix
     Int           chrom_size_mb
-    Int           cpu     = 4
+    Int           cpu     = 16
     Int           disk_gb = chrom_size_mb * 2 / 1024 + 10
   }
 
@@ -270,9 +277,10 @@ task ConcatChromVCF {
   command <<<
   set -euo pipefail
 
-  grep "~{dataset}_~{chrom}_" ~{write_lines(all_vcf_paths)} | sort > chunks.txt
+  grep "~{dataset}_~{chrom}_" ~{write_lines(all_vcf_paths)} | \
+    awk -F/ '{print $NF "\t" $0}' | sort -k1,1 | cut -f2- > chunks.txt
   echo "~{dataset} ~{chrom}: $(wc -l < chunks.txt) chunks" >&2
-
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
   bcftools concat \
     --file-list chunks.txt \
     --output-type z \
