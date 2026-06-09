@@ -1,0 +1,17 @@
+{
+    "exome_fg_plink.fg_vcf_basepath": "gs://finngen-production-library-red/finngen_R14/genotype_1.0/data/finngen_R14_chrCHROM.vcf.gz",
+    "exome_fg_plink.chunk_mb": 2000,
+
+    # Test on chr1 + chrX only; expand to full chrom list once validated
+    "exome_fg_plink.chroms": ["chr1", "chrX"],
+
+    "exome_fg_plink.exome_vcf_pairs": [
+        ["BOTNIA", "gs://fg-3/exome_v2/data/renamed_chr/THLBB2023_14_WES_Botnia.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],
+        ["ADPKD",  "gs://fg-3/exome_v2/data/renamed_chr/likely_pathogenic_annot_annotated_full_header_fix_resampled.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],
+        ["DALY",   "gs://fg-3/exome_v2/data/renamed_chr/fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],
+        ["WES",    "gs://fg-3/exome_v2/data/renamed_chr/finngen_wes_gnomad_v4.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"]
+    ],
+
+    "exome_fg_plink.plink_conv_args": "--double-id --allow-extra-chr --max-alleles 2 --split-par b38",
+    "exome_fg_plink.plink_merge_args": "--allow-extra-chr"
+}
