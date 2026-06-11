@@ -25,7 +25,8 @@ workflow exome_ld {
     String        plink_conv_args  = "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h"
     String        plink_merge_args = "--allow-extra-chr"
     String        out_prefix       = "finngen_R14_exome"
-    Int           plink_mem_gb     = 32
+    String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
+    Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
   }
@@ -69,7 +70,7 @@ workflow exome_ld {
         out_prefix      = "fg_chr" + chroms[ci],
         fg_pheno_file   = fg_pheno_file,
         plink_conv_args = plink_conv_args,
-        plink_mem_gb    = plink_mem_gb,
+        mem_gb          = mem_gb,
         cpu             = cpu,
         disk_gb         = ceil(size(ConcatFgChrom.vcf, "GB") * 2) + 5
     }
@@ -87,31 +88,43 @@ workflow exome_ld {
         exclude_bim     = FGtoPlink.bim[chrom_i],
         fg_pheno_file   = fg_pheno_file,
         plink_conv_args = plink_conv_args,
-        plink_mem_gb    = plink_mem_gb,
+        mem_gb          = mem_gb,
         cpu             = cpu,
         disk_gb         = disk_gb
     }
   }
 
   # ── Phase 6: merge FG + all exome per chrom ──────────────────────────────────
-  scatter (chrom in chroms) {
+  scatter (ci in range(length(chroms))) {
+    Float merge_fg_gb    = size(FGtoPlink.bed[ci], "GB")
+    Float merge_exome_gb = size(ExomeToPlink.bed, "GB") / length(chroms)
+    Float merge_total_gb = merge_fg_gb + merge_exome_gb
+
     call MergeChrom {
       input:
-        chrom            = chrom,
+        chrom            = chroms[ci],
         out_prefix       = out_prefix,
         all_fg_beds      = FGtoPlink.bed,
         all_exome_beds   = ExomeToPlink.bed,
         plink_merge_args = plink_merge_args,
-        plink_mem_gb     = plink_mem_gb,
+        mem_gb           = ceil(merge_total_gb * 2) + 4,
         cpu              = cpu,
-        disk_gb          = disk_gb
+        disk_gb          = ceil(merge_total_gb * 2) + 20
+    }
+
+    call ComputeLd {
+      input:
+        plink     = MergeChrom.plink,
+        fg_bim    = FGtoPlink.bim[ci],
+        ld_params = ld_params,
+        chrom     = chroms[ci],
+        cpu       = cpu
     }
   }
 
   output {
-    Array[File] merged_beds = MergeChrom.bed
-    Array[File] merged_bims = MergeChrom.bim
-    Array[File] merged_fams = MergeChrom.fam
+    Array[Array[File]] merged_plink = MergeChrom.plink
+    Array[File]        ld_results   = ComputeLd.ld
   }
 }
 
@@ -131,7 +144,6 @@ task BuildFgRegions {
     File                 positions_bim
     Array[String]        chroms
     Int                  chunk_mb
-    Int                  disk_gb = 50
   }
 
   command <<<
@@ -187,11 +199,17 @@ task BuildFgRegions {
       'BEGIN{printf "%.0f", bpv*n*sr/1024/1024}')
     echo "$chrom_mb" >> chrom_sizes_mb.txt
 
+    contig_end=$(bcftools view -h "$vcf" | grep "##contig=<ID=${vcf_chrom}," | grep -o 'length=[0-9]*' | cut -d= -f2 || true)
+
     split -l "$n_per_chunk" "$pos_file" "split_${chrom}_"
 
+    mapfile -t split_files < <(ls "split_${chrom}_"* | sort)
+    n_files=${#split_files[@]}
     chunk=0; start=1
-    for f in $(ls "split_${chrom}_"* | sort); do
+    for i in "${!split_files[@]}"; do
+      f="${split_files[$i]}"
       end=$(tail -n1 "$f")
+      [[ $i -eq $((n_files - 1)) && -n "$contig_end" ]] && end=$contig_end
       prefix="fg_${chrom}_$(printf '%03d' $chunk)"
       printf "%s\t%s\t%s:%d-%d\n" "$vcf" "$prefix" "$vcf_chrom" "$start" "$end"
       start=$((end + 1))
@@ -209,9 +227,6 @@ task BuildFgRegions {
     File                 union_samples  = "union_samples.txt"
   }
 
-  runtime {
-    disks: "local-disk ~{disk_gb} HDD"
-  }
 }
 
 
@@ -314,12 +329,12 @@ task VcfToPlink {
     File?         exclude_bim
     File          fg_pheno_file
     String        plink_conv_args
-    Int           plink_mem_gb
+    Int           mem_gb
     Int           cpu
     Int           disk_gb
   }
 
-  Int plink_mem_mb = plink_mem_gb * 1024
+  Int plink_mem_mb = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
 
   command <<<
   set -euo pipefail
@@ -354,11 +369,13 @@ task VcfToPlink {
     File bed = out_prefix + ".bed"
     File bim = out_prefix + ".bim"
     File fam = out_prefix + ".fam"
+    File log = out_prefix + ".log"
   }
 
   runtime {
-    cpu:   cpu
-    disks: "local-disk ~{disk_gb} HDD"
+    cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
   }
 }
 
@@ -374,12 +391,12 @@ task MergeChrom {
     Array[String] all_fg_beds     # Array[File] coerced to String — no localisation
     Array[String] all_exome_beds
     String        plink_merge_args
-    Int           plink_mem_gb
+    Int           mem_gb
     Int           cpu
     Int           disk_gb
   }
 
-  Int    plink_mem_mb = plink_mem_gb * 1024
+  Int    plink_mem_mb = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
   String out          = out_prefix + "_chr" + chrom
 
   command <<<
@@ -412,13 +429,74 @@ task MergeChrom {
   >>>
 
   output {
-    File bed = out + ".bed"
-    File bim = out + ".bim"
-    File fam = out + ".fam"
+    Array[File] plink = [out + ".bed", out + ".bim", out + ".fam", out + ".log"]
   }
 
   runtime {
-    cpu:   cpu
-    disks: "local-disk ~{disk_gb} HDD"
+    cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# ---------------------------------------------------------------------------
+# Compute LD between exome and FG variants in the merged plink fileset.
+# Annotates the merged BIM with fg/exome prefixes so plink2 output can be
+# filtered to cross-dataset pairs only.
+# ---------------------------------------------------------------------------
+task ComputeLd {
+  input {
+    Array[String] plink      # [bed, bim, fam, log] from MergeChrom — no localisation
+    File          fg_bim
+    String        ld_params
+    String        chrom
+    Int           cpu     = 8
+  }
+
+  String out_root = "exome_finngen_ld_" + chrom
+
+  command <<<
+  set -euo pipefail
+
+  to_fuse() { echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|'; }
+
+  bed=$(to_fuse "~{plink[0]}")
+  bim=$(to_fuse "~{plink[1]}")
+  fam=$(to_fuse "~{plink[2]}")
+
+  # annotate merged BIM: prefix FG variants with "fg", exome variants with "exome"
+  awk 'NR==FNR{fg[$2]=1; next}
+       BEGIN{OFS="\t"}
+       {$2 = (fg[$2] ? "fg" : "exome") $2; print}' \
+    ~{fg_bim} "$bim" > annotated.bim
+
+  plink2 \
+    --bed "$bed" \
+    --bim annotated.bim \
+    --fam "$fam" \
+    --r2-unphased ~{ld_params} \
+    --threads ~{cpu} \
+    --out ld
+
+  echo -e "EXOME_SNP\tFINNGEN_SNP\tR2" > ~{out_root}.ld
+  awk 'NR==1{next}
+       BEGIN{OFS="\t"}
+       (($3~/^fg/) != ($6~/^fg/)) {
+         exome = ($3~/^fg/) ? $6 : $3
+         fg    = ($3~/^fg/) ? $3 : $6
+         sub(/^fg/,"",fg); sub(/^exome/,"",exome)
+         print exome, fg, $7
+       }' ld.vcor >> ~{out_root}.ld
+
+  echo "~{chrom}: $(tail -n+2 ~{out_root}.ld | wc -l) exome-FG pairs" >&2
+  >>>
+
+  output {
+    File ld = out_root + ".ld"
+  }
+
+  runtime {
+    cpu:    cpu
   }
 }
