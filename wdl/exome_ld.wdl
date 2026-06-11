@@ -115,7 +115,7 @@ workflow exome_ld {
     call ComputeLd {
       input:
         plink     = MergeChrom.plink,
-        fg_bim    = FGtoPlink.bim[ci],
+        fg_bim    = FGtoPlink.bim[ci],   # File coerced to String — no localisation
         ld_params = ld_params,
         chrom     = chroms[ci],
         cpu       = cpu
@@ -125,6 +125,7 @@ workflow exome_ld {
   output {
     Array[Array[File]] merged_plink = MergeChrom.plink
     Array[File]        ld_results   = ComputeLd.ld
+    Array[File]        vcor_results = ComputeLd.vcor
   }
 }
 
@@ -448,13 +449,15 @@ task MergeChrom {
 task ComputeLd {
   input {
     Array[String] plink      # [bed, bim, fam, log] from MergeChrom — no localisation
-    File          fg_bim
+    String        fg_bim
     String        ld_params
     String        chrom
     Int           cpu     = 8
+    Int           mem_gb  = 16
   }
 
-  String out_root = "exome_finngen_ld_" + chrom
+  Int    plink_mem_mb = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
+  String out_root     = "exome_finngen_ld_" + chrom
 
   command <<<
   set -euo pipefail
@@ -464,39 +467,36 @@ task ComputeLd {
   bed=$(to_fuse "~{plink[0]}")
   bim=$(to_fuse "~{plink[1]}")
   fam=$(to_fuse "~{plink[2]}")
-
-  # annotate merged BIM: prefix FG variants with "fg", exome variants with "exome"
-  awk 'NR==FNR{fg[$2]=1; next}
-       BEGIN{OFS="\t"}
-       {$2 = (fg[$2] ? "fg" : "exome") $2; print}' \
-    ~{fg_bim} "$bim" > annotated.bim
+  fg_bim=$(to_fuse "~{fg_bim}")
 
   plink2 \
     --bed "$bed" \
-    --bim annotated.bim \
+    --bim "$bim" \
     --fam "$fam" \
+    --ld-snp-list "$fg_bim" \
     --r2-unphased ~{ld_params} \
+    --memory ~{plink_mem_mb} \
     --threads ~{cpu} \
     --out ld
 
-  echo -e "EXOME_SNP\tFINNGEN_SNP\tR2" > ~{out_root}.ld
-  awk 'NR==1{next}
-       BEGIN{OFS="\t"}
-       (($3~/^fg/) != ($6~/^fg/)) {
-         exome = ($3~/^fg/) ? $6 : $3
-         fg    = ($3~/^fg/) ? $3 : $6
-         sub(/^fg/,"",fg); sub(/^exome/,"",exome)
-         print exome, fg, $7
-       }' ld.vcor >> ~{out_root}.ld
+  echo -e "FG_SNP\tEXOME_SNP\tR2" > ~{out_root}.ld
+  awk 'BEGIN{OFS="\t"}
+       NR==FNR{fg[$2]=1; next}
+       FNR==1{next}
+       !fg[$6]{print $3, $6, $7}' \
+    "$fg_bim" ld.vcor >> ~{out_root}.ld
 
   echo "~{chrom}: $(tail -n+2 ~{out_root}.ld | wc -l) exome-FG pairs" >&2
   >>>
 
   output {
-    File ld = out_root + ".ld"
+    File ld   = out_root + ".ld"
+    File vcor = "ld.vcor"
   }
 
   runtime {
     cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk 20 HDD"
   }
 }
