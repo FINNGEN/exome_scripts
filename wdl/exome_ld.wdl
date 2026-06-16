@@ -118,7 +118,17 @@ workflow exome_ld {
         fg_bim    = FGtoPlink.bim[ci],   # File coerced to String — no localisation
         ld_params = ld_params,
         chrom     = chroms[ci],
-        cpu       = cpu
+        cpu       = cpu*2
+    }
+
+    call PlinkToVcf {
+      input:
+        plink      = MergeChrom.plink,
+        out_prefix = out_prefix,
+        chrom      = chroms[ci],
+        mem_gb     = mem_gb,
+        cpu        = cpu,
+        disk_gb    = ceil(merge_total_gb * 2) + 20
     }
   }
 
@@ -126,6 +136,7 @@ workflow exome_ld {
     Array[Array[File]] merged_plink = MergeChrom.plink
     Array[File]        ld_results   = ComputeLd.ld
     Array[File]        vcor_results = ComputeLd.vcor
+    Array[File]        merged_vcf   = PlinkToVcf.vcf
   }
 }
 
@@ -498,5 +509,53 @@ task ComputeLd {
     cpu:    cpu
     memory: mem_gb + " GB"
     disks:  "local-disk 20 HDD"
+  }
+}
+
+
+# ---------------------------------------------------------------------------
+# Convert merged plink fileset to bgzipped VCF.
+# plink is Array[String] (no localisation); files are reached via GCS FUSE.
+# ---------------------------------------------------------------------------
+task PlinkToVcf {
+  input {
+    Array[String] plink       # [bed, bim, fam, log] from MergeChrom — no localisation
+    String        out_prefix
+    String        chrom
+    Int           mem_gb  = 16
+    Int           cpu     = 4
+    Int           disk_gb = 50
+  }
+
+  Int    plink_mem_mb = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
+  String out          = out_prefix + "_chr" + chrom
+
+  command <<<
+  set -euo pipefail
+
+  to_fuse() { echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|'; }
+
+  bed=$(to_fuse "~{plink[0]}")
+  bfile="${bed%.bed}"
+
+  plink2 \
+    --bfile      "$bfile" \
+    --export     vcf bgz \
+    --output-chr chrM \
+    --memory     ~{plink_mem_mb} \
+    --threads    ~{cpu} \
+    --out        "~{out}"
+
+  echo "~{out}: done" >&2
+  >>>
+
+  output {
+    File vcf = out + ".vcf.gz"
+  }
+
+  runtime {
+    cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
   }
 }
