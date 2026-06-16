@@ -118,7 +118,8 @@ workflow exome_ld {
         fg_bim    = FGtoPlink.bim[ci],   # File coerced to String — no localisation
         ld_params = ld_params,
         chrom     = chroms[ci],
-        cpu       = cpu*2
+        cpu       = cpu*2,
+        disk_gb   = if chroms[ci] == "6" then 100 else 50
     }
 
     call PlinkToVcf {
@@ -134,8 +135,7 @@ workflow exome_ld {
 
   output {
     Array[Array[File]] merged_plink = MergeChrom.plink
-    Array[File]        ld_results   = ComputeLd.ld
-    Array[File]        vcor_results = ComputeLd.vcor
+    Array[File]        ld_results   = ComputeLd.ld    # .ld.gz per chrom
     Array[File]        merged_vcf   = PlinkToVcf.vcf
   }
 }
@@ -465,6 +465,7 @@ task ComputeLd {
     String        chrom
     Int           cpu     = 8
     Int           mem_gb  = 16
+    Int           disk_gb = 20
   }
 
   Int    plink_mem_mb = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
@@ -485,30 +486,29 @@ task ComputeLd {
     --bim "$bim" \
     --fam "$fam" \
     --ld-snp-list "$fg_bim" \
-    --r2-unphased ~{ld_params} \
+    --r2-unphased zs ~{ld_params} \
     --memory ~{plink_mem_mb} \
     --threads ~{cpu} \
     --out ld
 
-  echo -e "FG_SNP\tEXOME_SNP\tR2" > ~{out_root}.ld
   awk 'BEGIN{OFS="\t"}
        NR==FNR{fg[$2]=1; next}
-       FNR==1{next}
+       FNR==1{print "FG_SNP","EXOME_SNP","R2"; next}
        !fg[$6]{print $3, $6, $7}' \
-    "$fg_bim" ld.vcor >> ~{out_root}.ld
+    "$fg_bim" <(zstdcat ld.vcor.zst) | bgzip > ~{out_root}.ld.gz
 
-  echo "~{chrom}: $(tail -n+2 ~{out_root}.ld | wc -l) exome-FG pairs" >&2
+  echo "~{chrom}: $(zcat ~{out_root}.ld.gz | tail -n+2 | wc -l) exome-FG pairs" >&2
   >>>
 
   output {
-    File ld   = out_root + ".ld"
-    File vcor = "ld.vcor"
+    File ld   = out_root + ".ld.gz"
+    File vcor = "ld.vcor.zst"
   }
 
   runtime {
     cpu:    cpu
     memory: mem_gb + " GB"
-    disks:  "local-disk 20 HDD"
+    disks:  "local-disk ~{disk_gb} HDD"
   }
 }
 
@@ -534,7 +534,6 @@ task PlinkToVcf {
   set -euo pipefail
 
   to_fuse() { echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|'; }
-
   bed=$(to_fuse "~{plink[0]}")
   bfile="${bed%.bed}"
 
