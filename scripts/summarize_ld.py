@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-Summarize exome-FG LD files across chromosomes.
+Summarize exome-FG LD from a single merged ld.tsv.gz file (all chroms).
 
 Usage:
-    summarize_ld.py [OPTIONS] FILE [FILE ...]
+    summarize_ld.py [OPTIONS] FILE
 
-Outputs (in --outdir):
+Chrom is extracted from the FG_SNP column; no per-chrom files needed.
+
+Outputs (in --outdir, prefixed with {prefix}_r{min_r2}_):
     ld_stats.tsv           per-chromosome summary table
     fig1_variants.png      unique variants per chrom, stacked coding/non-coding
     fig2_pairs.png         pair breakdown per chrom (both/fg-only/ex-only/neither)
@@ -16,8 +18,6 @@ NOTE: handles \r\n line endings in input files (transitional, to be removed).
 """
 
 import argparse
-import gzip
-import io
 import re
 import sys
 from pathlib import Path
@@ -38,20 +38,17 @@ def chrom_sort_key(c):
         return (1, c)
 
 
-def chrom_from_path(path):
-    m = re.search(r'_ld_([^.]+)\.', Path(path).name)
-    return m.group(1) if m else Path(path).stem
 
-
-def read_ld(path, nrows=None):
-    opener = gzip.open if str(path).endswith('.gz') else open
-    with opener(str(path), 'rt') as f:
-        content = f.read().replace('\r\n', '\n').replace('\r', '\n')
-    df = pd.read_csv(io.StringIO(content), sep='\t', nrows=nrows)
-    for col in ('is_fg_coding', 'is_ex_coding'):
-        if col in df.columns and df[col].dtype == object:
-            df[col] = df[col].map({'True': True, 'False': False})
-    return df
+def read_ld(path, min_r2=0.0, nrows=None):
+    chunks = []
+    for chunk in pd.read_csv(path, sep='\t', chunksize=200_000, nrows=nrows):
+        if min_r2 > 0:
+            chunk = chunk[chunk['R2'] >= min_r2]
+        for col in ('is_fg_coding', 'is_ex_coding'):
+            if col in chunk.columns and chunk[col].dtype == object:
+                chunk[col] = chunk[col].map({'True': True, 'False': False})
+        chunks.append(chunk)
+    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
 # ── stats ─────────────────────────────────────────────────────────────────────
@@ -88,7 +85,7 @@ def compute_stats(df, chrom):
 
 # ── figures ───────────────────────────────────────────────────────────────────
 
-def fig1_variants(stats, outdir, pfx=''):
+def fig1_variants(stats, outdir, pfx='', r2_label=''):
     """Stacked bar: unique coding/non-coding variants per chrom, FG and exome."""
     chroms = stats['chrom'].tolist()
     x = np.arange(len(chroms))
@@ -108,14 +105,14 @@ def fig1_variants(stats, outdir, pfx=''):
         ax.set_title(title)
         ax.legend()
 
-    fig.suptitle('Unique variants in LD (FG ↔ Exome) by chromosome')
+    fig.suptitle(f'Unique variants in LD (FG ↔ Exome) by chromosome ({r2_label})')
     fig.tight_layout()
     fig.savefig(outdir / f'{pfx}fig1_variants.png', dpi=150)
     plt.close(fig)
     print("Saved fig1_variants.png", file=sys.stderr)
 
 
-def fig2_pairs(stats, outdir, pfx=''):
+def fig2_pairs(stats, outdir, pfx='', r2_label=''):
     """Stacked bar: pair breakdown (both/fg-only/ex-only/neither) per chrom."""
     chroms = stats['chrom'].tolist()
     x = np.arange(len(chroms))
@@ -134,7 +131,7 @@ def fig2_pairs(stats, outdir, pfx=''):
     ax.set_xticks(x)
     ax.set_xticklabels(chroms, rotation=45, ha='right')
     ax.set_ylabel('Pairs')
-    ax.set_title('LD pair breakdown by coding status per chromosome')
+    ax.set_title(f'LD pair breakdown by coding status per chromosome ({r2_label})')
     ax.legend()
     fig.tight_layout()
     fig.savefig(outdir / f'{pfx}fig2_pairs.png', dpi=150)
@@ -142,7 +139,7 @@ def fig2_pairs(stats, outdir, pfx=''):
     print("Saved fig2_pairs.png", file=sys.stderr)
 
 
-def fig3_r2_dist(r2_data, outdir, pfx=''):
+def fig3_r2_dist(r2_data, outdir, pfx='', r2_label=''):
     """Violin: R2 distribution by coding category, pooled across chroms."""
     keys   = ['both_coding', 'fg_only', 'ex_only', 'neither']
     labels = ['both coding', 'FG only', 'exome only', 'neither']
@@ -162,14 +159,14 @@ def fig3_r2_dist(r2_data, outdir, pfx=''):
     ax.set_xticklabels(valid_labels)
     ax.set_ylabel('R²')
     ax.set_ylim(0, 1)
-    ax.set_title('R² distribution by coding category (all chromosomes)')
+    ax.set_title(f'R² distribution by coding category — all chromosomes ({r2_label})')
     fig.tight_layout()
     fig.savefig(outdir / f'{pfx}fig3_r2_dist.png', dpi=150)
     plt.close(fig)
     print("Saved fig3_r2_dist.png", file=sys.stderr)
 
 
-def fig4_coding_frac(stats, outdir, pfx=''):
+def fig4_coding_frac(stats, outdir, pfx='', r2_label=''):
     """Line plot: coding fraction per chrom for FG and exome."""
     chroms = stats['chrom'].tolist()
     x = np.arange(len(chroms))
@@ -180,7 +177,7 @@ def fig4_coding_frac(stats, outdir, pfx=''):
     ax.set_xticks(x)
     ax.set_xticklabels(chroms, rotation=45, ha='right')
     ax.set_ylabel('Coding fraction (%)')
-    ax.set_title('Coding fraction of variants in LD per chromosome')
+    ax.set_title(f'Coding fraction of variants in LD per chromosome ({r2_label})')
     ax.legend()
     ax.grid(axis='y', alpha=0.3)
     fig.tight_layout()
@@ -194,9 +191,11 @@ def fig4_coding_frac(stats, outdir, pfx=''):
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('filelist', help='file containing one ld.tsv.gz path per line, or - for stdin')
+    parser.add_argument('input_file', help='merged ld.tsv.gz file (all chroms concatenated)')
     parser.add_argument('--outdir', default='.', help='Output directory (default: cwd)')
     parser.add_argument('--prefix', default='exome_ld', help='Output file prefix (default: exome_ld)')
+    parser.add_argument('--min_r2', type=float, default=0.0,
+                        help='Keep only pairs with R2 >= threshold (default: 0, no filter)')
     parser.add_argument('--test', nargs='?', const=1000, default=None, type=int,
                         help='Only read first N lines per file (default N=1000 if flag given without value)')
     parser.add_argument('--r2-sample', type=int, default=50_000,
@@ -205,33 +204,38 @@ def main():
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
-    pfx = args.prefix + "_" if args.prefix else ""
+    pfx = f"{args.prefix}_r{args.min_r2}_" if args.prefix else f"r{args.min_r2}_"
+    r2_label = f"R²≥{args.min_r2}"
 
-    src = sys.stdin if args.filelist == '-' else open(args.filelist)
-    files = sorted(
-        (line.rstrip('\n') for line in src if line.strip()),
-        key=lambda p: chrom_sort_key(chrom_from_path(p)),
-    )
+    print(f"Reading {args.input_file}"
+          + (f" [test: {args.test} rows]" if args.test else ""), file=sys.stderr)
+    df = read_ld(args.input_file, min_r2=args.min_r2, nrows=args.test)
+
+    filtered_path = outdir / f'{pfx}ld.tsv.gz'
+    df.to_csv(filtered_path, sep='\t', index=False, compression='gzip')
+    print(f"Filtered pairs written to {filtered_path}", file=sys.stderr)
+
+    df['chrom'] = df['FG_SNP'].str.split(r'[_:]').str[0].str.replace(r'^chr', '', regex=True)
+
+    chroms = sorted(df['chrom'].unique(), key=chrom_sort_key)
+    print(f"Chroms found: {chroms}", file=sys.stderr)
 
     stats_rows = []
     r2_data = {k: [] for k in ('both_coding', 'fg_only', 'ex_only', 'neither')}
+    rng = np.random.default_rng(seed=42)
 
-    for path in files:
-        chrom = chrom_from_path(path)
-        print(f"Reading chrom {chrom}: {path}"
-              + (f" [test: {args.test} lines]" if args.test else ""), file=sys.stderr)
-        df = read_ld(path, nrows=args.test)
-        stats_rows.append(compute_stats(df, chrom))
+    for chrom in chroms:
+        cdf = df[df['chrom'] == chrom]
+        stats_rows.append(compute_stats(cdf, chrom))
 
         masks = {
-            'both_coding': ( df['is_fg_coding'] &  df['is_ex_coding']),
-            'fg_only':     ( df['is_fg_coding'] & ~df['is_ex_coding']),
-            'ex_only':     (~df['is_fg_coding'] &  df['is_ex_coding']),
-            'neither':     (~df['is_fg_coding'] & ~df['is_ex_coding']),
+            'both_coding': ( cdf['is_fg_coding'] &  cdf['is_ex_coding']),
+            'fg_only':     ( cdf['is_fg_coding'] & ~cdf['is_ex_coding']),
+            'ex_only':     (~cdf['is_fg_coding'] &  cdf['is_ex_coding']),
+            'neither':     (~cdf['is_fg_coding'] & ~cdf['is_ex_coding']),
         }
-        rng = np.random.default_rng(seed=42)
         for k, mask in masks.items():
-            vals = df.loc[mask, 'R2'].values
+            vals = cdf.loc[mask, 'R2'].values
             if len(vals) > args.r2_sample:
                 vals = rng.choice(vals, args.r2_sample, replace=False)
             r2_data[k].extend(vals.tolist())
@@ -252,10 +256,10 @@ def main():
             arr = rng.choice(arr, cap, replace=False)
         r2_capped[k] = arr
 
-    fig1_variants(stats, outdir, pfx)
-    fig2_pairs(stats, outdir, pfx)
-    fig3_r2_dist(r2_capped, outdir, pfx)
-    fig4_coding_frac(stats, outdir, pfx)
+    fig1_variants(stats, outdir, pfx, r2_label)
+    fig2_pairs(stats, outdir, pfx, r2_label)
+    fig3_r2_dist(r2_capped, outdir, pfx, r2_label)
+    fig4_coding_frac(stats, outdir, pfx, r2_label)
 
     print("Done.", file=sys.stderr)
 

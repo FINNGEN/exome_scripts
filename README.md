@@ -350,11 +350,11 @@ GatherLd   [after scatter]
 
 7. **ComputeLd** *(scatter over chromosomes)*: Runs `plink2 --r2-unphased zs` on the merged BED using the FG BIM as `--ld-snp-list`, so LD is computed only for pairs where one variant is a FG array variant. The `zs` modifier tells plink2 to write the native `ld.vcor.zst` (zstd-compressed); `--zst-level 1` sets the compression level. No custom docker — runs on the same VM as the other plink tasks.
 
-8. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst` to `.vcor.gz` (bgzip), then calls `scripts/flag_ld_coding.py` to keep only FG→exome pairs with R² ≥ `min_r2` (default 0.6) and optionally annotate coding status. Outputs both `exome_finngen_ld_<chrom>.ld.tsv.gz` (filtered pairs) and `exome_finngen_ld_<chrom>.vcor.gz` (all FG-anchored pairs above the plink2 window threshold).
+8. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst` to `.vcor.gz` (bgzip), then calls `scripts/flag_ld_coding.py` to keep only FG→exome pairs with R² ≥ `min_r2` (default 0.6) and optionally annotate coding status. Outputs `exome_finngen_ld_<chrom>.ld.tsv.gz`.
 
 9. **PlinkToVcf** *(scatter over chromosomes)*: Exports the merged plink BED back to a bgzipped VCF. These VCFs are the input for the VEP annotation step described below.
 
-10. **GatherLd**: Concatenates all per-chrom `ld.tsv.gz` and `vcor.gz` files (header kept from first chrom, skipped for rest) into genome-wide combined files. Then runs `scripts/summarize_ld.py` on the per-chrom LD files to produce a stats TSV and four summary figures (see below).
+10. **GatherLd**: Concatenates all per-chrom `ld.tsv.gz` files (header kept from first chrom, skipped for rest) into a genome-wide combined file. Then runs `scripts/summarize_ld.py` to produce a filtered subset at the `min_r2` threshold, a stats TSV, and four summary figures (see below).
 
 **Inputs:**
 
@@ -379,13 +379,12 @@ GatherLd   [after scatter]
 **Outputs:**
 
 - `merged_plink[][]`: Per-chromosome merged plink filesets (BED/BIM/FAM/log) — FG + all exome datasets combined
-- `ld_results[]`: Per-chrom `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs with R²≥min_r2, with optional coding flags
-- `vcor_results[]`: Per-chrom `exome_finngen_ld_<chrom>.vcor.gz` — all FG-anchored pairs above the plink2 window threshold
+- `ld_results[]`: Per-chrom `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs passing the plink2 window threshold, with optional coding flags
 - `merged_vcf[]`: Per-chromosome bgzipped VCFs of the merged plink data (used as input to VEP)
-- `ld_combined`: `{out_prefix}.ld.tsv.gz` — all chromosomes concatenated
-- `vcor_combined`: `{out_prefix}.vcor.gz` — all chromosomes concatenated
-- `ld_stats`: `{out_prefix}_ld_stats.tsv` — per-chromosome summary table (see `summarize_ld.py`)
-- `figures[]`: Four summary PNGs (see `summarize_ld.py`)
+- `ld_combined`: `{out_prefix}.ld.tsv.gz` — all chromosomes concatenated (unfiltered by min_r2)
+- `ld_filtered`: `{out_prefix}_r{min_r2}_ld.tsv.gz` — genome-wide pairs filtered to R²≥min_r2
+- `ld_stats`: `{out_prefix}_r{min_r2}_ld_stats.tsv` — per-chromosome summary table (see `summarize_ld.py`)
+- `figures[]`: Four summary PNGs named `{out_prefix}_r{min_r2}_fig*.png` (see `summarize_ld.py`)
 
 ---
 
@@ -455,11 +454,12 @@ Reads N per-chromosome `ld.tsv.gz` files, computes per-chromosome statistics on 
 
 | File | Description |
 |------|-------------|
-| `{prefix}_ld_stats.tsv` | Per-chromosome counts: n_pairs, n_fg/ex_variants, coding fractions, pair breakdown |
-| `{prefix}_fig1_variants.png` | Stacked bar: unique coding/non-coding variants per chrom (FG and exome panels) |
-| `{prefix}_fig2_pairs.png` | Stacked bar: pairs by coding category per chrom (both/FG-only/exome-only/neither) |
-| `{prefix}_fig3_r2_dist.png` | Violin: R² distribution by coding category, pooled across all chroms |
-| `{prefix}_fig4_coding_frac.png` | Line plot: coding fraction per chrom for FG and exome variants |
+| `{prefix}_r{min_r2}_ld.tsv.gz` | Pairs filtered to R²≥min_r2 |
+| `{prefix}_r{min_r2}_ld_stats.tsv` | Per-chromosome counts: n_pairs, n_fg/ex_variants, coding fractions, pair breakdown |
+| `{prefix}_r{min_r2}_fig1_variants.png` | Stacked bar: unique coding/non-coding variants per chrom (FG and exome panels) |
+| `{prefix}_r{min_r2}_fig2_pairs.png` | Stacked bar: pairs by coding category per chrom (both/FG-only/exome-only/neither) |
+| `{prefix}_r{min_r2}_fig3_r2_dist.png` | Violin: R² distribution by coding category, pooled across all chroms |
+| `{prefix}_r{min_r2}_fig4_coding_frac.png` | Line plot: coding fraction per chrom for FG and exome variants |
 
 Stats TSV columns: `chrom`, `n_pairs`, `n_fg_variants`, `fg_coding`, `fg_coding_pct`, `n_ex_variants`, `ex_coding`, `ex_coding_pct`, `n_pairs_both_coding`, `n_pairs_fg_only`, `n_pairs_ex_only`, `n_pairs_neither`.
 

@@ -142,6 +142,7 @@ def main():
     parser.add_argument("--annot",       default=None,   help="VEP annotation TSV (plain/.gz) or .pkl — optional")
     parser.add_argument("--annot_id_col",default="rsid", help="Variant ID column in annotation (default: rsid)")
     parser.add_argument("--out",         default=None,   help="Output file (default: <workdir>/<vcor_stem>_fg_exome_ld.tsv)")
+    parser.add_argument("--gz",          action="store_true", help="Write output as gzip directly (appends .gz to out path)")
     parser.add_argument("--min_r2",      default=0.6, type=float,
                         help="Keep only pairs with R2 >= threshold (default: 0.6)")
     parser.add_argument("--test",        nargs="?", const=1000, default=None, type=int,
@@ -152,7 +153,9 @@ def main():
     consequence = load_consequence(args.annot, args.annot_id_col) if args.annot else None
 
     stem = strip_suffixes(Path(args.vcor).name)
-    out_path = args.out or str(Path.cwd() / f"{stem}_fg_exome_ld.tsv")
+    out_path = args.out or str(Path.cwd() / f"{stem}.ld.tsv")
+    if args.gz and not out_path.endswith(".gz"):
+        out_path += ".gz"
 
     out_fieldnames = ["FG_SNP", "EXOME_SNP", "R2"]
     if consequence:
@@ -161,7 +164,8 @@ def main():
     missing_fg, missing_ex = set(), set()
     n_written = 0
 
-    with open_with_progress(args.vcor) as fin, open(out_path, "w", newline="") as fout:
+    open_out = gzip.open(out_path, "wt") if args.gz else open(out_path, "w", newline="")
+    with open_with_progress(args.vcor) as fin, open_out as fout:
         reader = csv.DictReader(fin, delimiter="\t")
         fieldnames = reader.fieldnames
         if not fieldnames:
@@ -204,7 +208,7 @@ def main():
     print(f"Written {n_written} FG-exome pairs to {out_path}", file=sys.stderr)
 
     if missing_fg or missing_ex:
-        err_path = out_path.replace(".tsv", "_missing.txt")
+        err_path = strip_suffixes(out_path) + "_missing.txt"
         with open(err_path, "w") as ferr:
             for v in sorted(missing_fg):
                 ferr.write(f"FG\t{v}\n")
