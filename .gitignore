@@ -170,3 +170,6 @@ cython_debug/
 
 *~
 **/*~
+
+# Test outputs
+scripts/tests/
