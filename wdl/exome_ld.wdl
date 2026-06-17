@@ -26,6 +26,8 @@ workflow exome_ld {
     String        plink_merge_args = "--allow-extra-chr"
     String        out_prefix       = "finngen_R14_exome"
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
+    File          filter_script                  # path to flag_ld_coding.py
+    File?         annot                          # optional VEP annotation pkl/TSV
     Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
@@ -122,6 +124,15 @@ workflow exome_ld {
         disk_gb   = if chroms[ci] == "6" then 100 else 50
     }
 
+    call FilterLd {
+      input:
+        vcor         = ComputeLd.vcor,
+        fg_bim       = FGtoPlink.bim[ci],
+        script       = filter_script,
+        chrom        = chroms[ci],
+        annot        = annot
+    }
+
     call PlinkToVcf {
       input:
         plink      = MergeChrom.plink,
@@ -135,7 +146,8 @@ workflow exome_ld {
 
   output {
     Array[Array[File]] merged_plink = MergeChrom.plink
-    Array[File]        ld_results   = ComputeLd.ld    # .ld.gz per chrom
+    Array[File]        ld_results   = FilterLd.ld
+    Array[File]        vcor_results = ComputeLd.vcor
     Array[File]        merged_vcf   = PlinkToVcf.vcf
   }
 }
@@ -486,29 +498,63 @@ task ComputeLd {
     --bim "$bim" \
     --fam "$fam" \
     --ld-snp-list "$fg_bim" \
-    --r2-unphased zs ~{ld_params} \
+    --r2-unphased ~{ld_params} \
     --memory ~{plink_mem_mb} \
     --threads ~{cpu} \
     --out ld
 
-  awk 'BEGIN{OFS="\t"}
-       NR==FNR{fg[$2]=1; next}
-       FNR==1{print "FG_SNP","EXOME_SNP","R2"; next}
-       !fg[$6]{print $3, $6, $7}' \
-    "$fg_bim" <(zstdcat ld.vcor.zst) | bgzip > ~{out_root}.ld.gz
-
-  echo "~{chrom}: $(zcat ~{out_root}.ld.gz | tail -n+2 | wc -l) exome-FG pairs" >&2
+  bgzip ld.vcor
+  mv ld.vcor.gz ~{out_root}.vcor.gz
+  echo "~{chrom}: $(zcat ~{out_root}.vcor.gz | tail -n+2 | wc -l) raw pairs" >&2
   >>>
 
   output {
-    File ld   = out_root + ".ld.gz"
-    File vcor = "ld.vcor.zst"
+    File vcor = out_root + ".vcor.gz"
   }
 
   runtime {
     cpu:    cpu
     memory: mem_gb + " GB"
     disks:  "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# ---------------------------------------------------------------------------
+# Filter raw plink2 .vcor to FG→exome pairs and optionally flag coding status.
+# Uses flag_ld_coding.py. If annot is provided, adds is_fg_coding/is_ex_coding.
+# Output: exome_finngen_ld_<chrom>.ld.gz
+# ---------------------------------------------------------------------------
+task FilterLd {
+  input {
+    File   vcor
+    File   fg_bim
+    File   script
+    String chrom
+    File?  annot
+  }
+
+  String out = "exome_finngen_ld_" + chrom + ".ld.tsv"
+
+  command <<<
+  set -euo pipefail
+
+  python3 ~{script} \
+    --vcor   ~{vcor} \
+    --fg_bim ~{fg_bim} \
+    --out    ~{out} \
+    ~{if defined(annot) then "--annot " + select_first([annot]) else ""}
+
+  bgzip ~{out}
+  echo "~{chrom}: $(zcat ~{out}.gz | tail -n+2 | wc -l) FG-exome pairs" >&2
+  >>>
+
+  output {
+    File ld = out + ".gz"
+  }
+
+  runtime {
+    docker: "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
   }
 }
 
