@@ -293,7 +293,7 @@ The LD step computes linkage disequilibrium (LD) between FinnGen array variants 
 
 ### exome_ld.wdl
 
-**Merge FG + exome plink data per chromosome, compute LD, and flag coding status**
+**Merge FG + exome plink data per chromosome, compute LD, flag coding status, and gather summary**
 
 **Workflow phases:**
 
@@ -319,14 +319,19 @@ MergeChrom ×n_chroms
       │
       ├─ ComputeLd
       │     plink2 --r2-unphased anchored on FG variants (--ld-snp-list fg.bim)
-      │     outputs raw .vcor.gz with all pairs above r2 threshold
+      │     outputs native .vcor.zst (no custom docker)
       │
       ├─ FilterLd (calls flag_ld_coding.py)
-      │     keeps only FG→exome pairs; optionally adds is_fg_coding/is_ex_coding
-      │     outputs exome_finngen_ld_<chrom>.ld.tsv.gz
+      │     decompresses .vcor.zst → .vcor.gz; keeps FG→exome pairs with R2≥min_r2;
+      │     optionally adds is_fg_coding/is_ex_coding
+      │     outputs exome_finngen_ld_<chrom>.ld.tsv.gz + .vcor.gz
       │
       └─ PlinkToVcf
             exports merged plink → bgzipped VCF (used as input to VEP annotation)
+
+GatherLd   [after scatter]
+      concatenates all per-chrom ld.tsv.gz and vcor.gz files;
+      runs summarize_ld.py → stats TSV + 4 summary figures
 ```
 
 **Step-by-step:**
@@ -343,11 +348,13 @@ MergeChrom ×n_chroms
 
 6. **MergeChrom** *(scatter over chromosomes)*: Merges the FG plink fileset and all exome plink filesets for a given chromosome into a single combined BED via `plink --merge-list`.
 
-7. **ComputeLd** *(scatter over chromosomes)*: Runs `plink2 --r2-unphased` on the merged BED using the FG BIM as `--ld-snp-list`, so LD is computed only for pairs where one variant is a FG array variant. Default window: 1000 kb, r² ≥ 0.05. Output is bgzipped `.vcor.gz`.
+7. **ComputeLd** *(scatter over chromosomes)*: Runs `plink2 --r2-unphased zs` on the merged BED using the FG BIM as `--ld-snp-list`, so LD is computed only for pairs where one variant is a FG array variant. The `zs` modifier tells plink2 to write the native `ld.vcor.zst` (zstd-compressed); `--zst-level 1` sets the compression level. No custom docker — runs on the same VM as the other plink tasks.
 
-8. **FilterLd** *(scatter over chromosomes)*: Calls `scripts/flag_ld_coding.py` (see below) to keep only FG→exome pairs and optionally annotate coding status. Output is `exome_finngen_ld_<chrom>.ld.tsv.gz`.
+8. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst` to `.vcor.gz` (bgzip), then calls `scripts/flag_ld_coding.py` to keep only FG→exome pairs with R² ≥ `min_r2` (default 0.6) and optionally annotate coding status. Outputs both `exome_finngen_ld_<chrom>.ld.tsv.gz` (filtered pairs) and `exome_finngen_ld_<chrom>.vcor.gz` (all FG-anchored pairs above the plink2 window threshold).
 
 9. **PlinkToVcf** *(scatter over chromosomes)*: Exports the merged plink BED back to a bgzipped VCF. These VCFs are the input for the VEP annotation step described below.
+
+10. **GatherLd**: Concatenates all per-chrom `ld.tsv.gz` and `vcor.gz` files (header kept from first chrom, skipped for rest) into genome-wide combined files. Then runs `scripts/summarize_ld.py` on the per-chrom LD files to produce a stats TSV and four summary figures (see below).
 
 **Inputs:**
 
@@ -360,20 +367,25 @@ MergeChrom ×n_chroms
   "exome_ld.chroms":           ["1","2",...,"22","23"],
   "exome_ld.chunk_mb":         600,
   "exome_ld.ld_params":        "--ld-window-kb 1000 --ld-window-r2 0.05",
+  "exome_ld.min_r2":           0.6,
   "exome_ld.out_prefix":       "finngen_R14_exome",
-  "exome_ld.filter_script":    "scripts/flag_ld_coding.py",
-  "exome_ld.annot":            "gs://bucket/vep_annotation.pkl"
+  "exome_ld.annot":            "gs://bucket/vep_annotation.pkl",
+  "exome_ld.exome_docker":     "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
 }
 ```
 
-`annot` is optional. `CHROM` in VCF template paths is replaced at runtime with each chromosome name.
+`annot` is optional. `CHROM` in VCF template paths is replaced at runtime with each chromosome name. `min_r2` controls the R² threshold applied in `FilterLd` (default 0.6); note this is separate from `--ld-window-r2` in `ld_params` which is the lower bound passed to plink2 (default 0.05).
 
 **Outputs:**
 
 - `merged_plink[][]`: Per-chromosome merged plink filesets (BED/BIM/FAM/log) — FG + all exome datasets combined
-- `vcor_results[]`: Raw plink2 `.vcor.gz` files — all FG-anchored pairs above the r² threshold
-- `ld_results[]`: Filtered `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs only, with optional coding flags
+- `ld_results[]`: Per-chrom `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs with R²≥min_r2, with optional coding flags
+- `vcor_results[]`: Per-chrom `exome_finngen_ld_<chrom>.vcor.gz` — all FG-anchored pairs above the plink2 window threshold
 - `merged_vcf[]`: Per-chromosome bgzipped VCFs of the merged plink data (used as input to VEP)
+- `ld_combined`: `{out_prefix}.ld.tsv.gz` — all chromosomes concatenated
+- `vcor_combined`: `{out_prefix}.vcor.gz` — all chromosomes concatenated
+- `ld_stats`: `{out_prefix}_ld_stats.tsv` — per-chromosome summary table (see `summarize_ld.py`)
+- `figures[]`: Four summary PNGs (see `summarize_ld.py`)
 
 ---
 
@@ -385,9 +397,10 @@ MergeChrom ×n_chroms
 
 1. Loads the FG variant IDs from the FG BIM file.
 2. Reads the raw plink2 `.vcor` file (plain or gzipped).
-3. Keeps only rows where `ID_A` is a FG variant and `ID_B` is not — i.e. FG→exome pairs. This drops exome→exome and FG→FG pairs that plink2 may include.
-4. If `--annot` is provided, looks up the most severe VEP consequence for each variant and adds boolean columns `is_fg_coding` / `is_ex_coding` (true if the consequence is missense, stop-gain, frameshift, splice, or similar protein-altering change).
-5. On first read the annotation TSV is parsed and cached as a `.pkl` file in the working directory. Subsequent runs (including the WDL task) load the `.pkl` directly, which is much faster than re-reading the full TSV.
+3. Drops pairs with R² below `--min_r2` (default 0.6).
+4. Keeps only rows where `ID_A` is a FG variant and `ID_B` is not — i.e. FG→exome pairs. This drops exome→exome and FG→FG pairs that plink2 may include.
+5. If `--annot` is provided, looks up the most severe VEP consequence for each variant and adds boolean columns `is_fg_coding` / `is_ex_coding` (true if the consequence is missense, stop-gain, frameshift, splice, or similar protein-altering change).
+6. On first read the annotation TSV is parsed and cached as a `.pkl` file in the working directory. Subsequent runs (including the WDL task) load the `.pkl` directly, which is much faster than re-reading the full TSV.
 
 **Output columns:**
 
@@ -419,13 +432,52 @@ The script reads `variant` and `most_severe`, builds a `variant → consequence`
 
 ```bash
 python scripts/flag_ld_coding.py \
-  --vcor   exome_finngen_ld_21.vcor.gz \
-  --fg_bim fg_chr21.bim \
-  --annot  exome_sites_only_annotated_annot.tsv.bgz \
-  --out    exome_finngen_ld_21.ld.tsv
+  --vcor    exome_finngen_ld_21.vcor.gz \
+  --fg_bim  fg_chr21.bim \
+  --annot   exome_sites_only_annotated_annot.tsv.bgz \
+  --min_r2  0.6 \
+  --out     exome_finngen_ld_21.ld.tsv
 ```
 
 Run this locally once with the full annotation TSV — this generates the `.pkl` cache file in the working directory. Upload that `.pkl` to GCS and pass it as `exome_ld.annot` in Pass 2 so the WDL task loads it directly without re-parsing the TSV.
+
+---
+
+### summarize_ld.py
+
+`scripts/summarize_ld.py` is called by the `GatherLd` task and can also be run locally on a set of per-chrom LD files.
+
+**What it does:**
+
+Reads N per-chromosome `ld.tsv.gz` files, computes per-chromosome statistics on unique variants and pairs, and writes four summary figures plus a stats TSV.
+
+**Outputs:**
+
+| File | Description |
+|------|-------------|
+| `{prefix}_ld_stats.tsv` | Per-chromosome counts: n_pairs, n_fg/ex_variants, coding fractions, pair breakdown |
+| `{prefix}_fig1_variants.png` | Stacked bar: unique coding/non-coding variants per chrom (FG and exome panels) |
+| `{prefix}_fig2_pairs.png` | Stacked bar: pairs by coding category per chrom (both/FG-only/exome-only/neither) |
+| `{prefix}_fig3_r2_dist.png` | Violin: R² distribution by coding category, pooled across all chroms |
+| `{prefix}_fig4_coding_frac.png` | Line plot: coding fraction per chrom for FG and exome variants |
+
+Stats TSV columns: `chrom`, `n_pairs`, `n_fg_variants`, `fg_coding`, `fg_coding_pct`, `n_ex_variants`, `ex_coding`, `ex_coding_pct`, `n_pairs_both_coding`, `n_pairs_fg_only`, `n_pairs_ex_only`, `n_pairs_neither`.
+
+**Standalone usage:**
+
+```bash
+# from a directory containing the per-chrom files
+python scripts/summarize_ld.py \
+  <(ls exome_finngen_ld_*.ld.tsv.gz) \
+  --prefix finngen_R14_exome \
+  --outdir ~/results/ld_summary
+
+# or pipe from stdin
+ls exome_finngen_ld_*.ld.tsv.gz | python scripts/summarize_ld.py - --outdir .
+
+# quick test on first 1000 lines per file
+python scripts/summarize_ld.py <(ls *.ld.tsv.gz) --test
+```
 
 ---
 

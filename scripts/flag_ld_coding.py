@@ -142,6 +142,8 @@ def main():
     parser.add_argument("--annot",       default=None,   help="VEP annotation TSV (plain/.gz) or .pkl — optional")
     parser.add_argument("--annot_id_col",default="rsid", help="Variant ID column in annotation (default: rsid)")
     parser.add_argument("--out",         default=None,   help="Output file (default: <workdir>/<vcor_stem>_fg_exome_ld.tsv)")
+    parser.add_argument("--min_r2",      default=0.6, type=float,
+                        help="Keep only pairs with R2 >= threshold (default: 0.6)")
     parser.add_argument("--test",        nargs="?", const=1000, default=None, type=int,
                         help="Only process first N data lines (default N=1000 if flag given without value)")
     args = parser.parse_args()
@@ -165,7 +167,7 @@ def main():
         if not fieldnames:
             raise ValueError(f"vcor file has no header or is empty: {args.vcor}")
 
-        writer = csv.DictWriter(fout, fieldnames=out_fieldnames, delimiter="\t")
+        writer = csv.DictWriter(fout, fieldnames=out_fieldnames, delimiter="\t", lineterminator="\n")
         writer.writeheader()
 
         for i, row in enumerate(reader):
@@ -174,6 +176,9 @@ def main():
 
             fg_id  = row["ID_A"]
             ex_id  = row["ID_B"]
+
+            if float(row["UNPHASED_R2"]) < args.min_r2:
+                continue
 
             # keep only FG→exome pairs (ID_B not a FG variant)
             if ex_id in fg_ids:

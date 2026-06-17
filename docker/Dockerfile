@@ -1,7 +1,7 @@
 FROM eu.gcr.io/finngen-refinery-dev/bioinformatics:0.8.2
 
 RUN apt-get update && apt-get upgrade --yes
-RUN apt-get install -qqy python3 python3-venv python3-pip parallel pv pigz && \
+RUN apt-get install -qqy python3 python3-venv python3-pip parallel pv pigz zstd && \
     pip3 install numpy pandas matplotlib tqdm
 
 #Latest plink2 version

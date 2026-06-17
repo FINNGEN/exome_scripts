@@ -26,8 +26,9 @@ workflow exome_ld {
     String        plink_merge_args = "--allow-extra-chr"
     String        out_prefix       = "finngen_R14_exome"
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
-    File          filter_script                  # path to flag_ld_coding.py
+    Float         min_r2           = 0.6
     File?         annot                          # optional VEP annotation pkl/TSV
+    String        exome_docker     = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
     Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
@@ -116,21 +117,22 @@ workflow exome_ld {
 
     call ComputeLd {
       input:
-        plink     = MergeChrom.plink,
-        fg_bim    = FGtoPlink.bim[ci],   # File coerced to String — no localisation
-        ld_params = ld_params,
-        chrom     = chroms[ci],
-        cpu       = cpu*2,
-        disk_gb   = if chroms[ci] == "6" then 100 else 50
+        plink        = MergeChrom.plink,
+        fg_bim       = FGtoPlink.bim[ci],   # File coerced to String — no localisation
+        ld_params    = ld_params,
+        chrom        = chroms[ci],
+        cpu          = cpu*2,
+        disk_gb      = if chroms[ci] == "6" then 100 else 50
     }
 
     call FilterLd {
       input:
         vcor         = ComputeLd.vcor,
         fg_bim       = FGtoPlink.bim[ci],
-        script       = filter_script,
         chrom        = chroms[ci],
-        annot        = annot
+        annot        = annot,
+        min_r2       = min_r2,
+        docker       = exome_docker
     }
 
     call PlinkToVcf {
@@ -144,11 +146,24 @@ workflow exome_ld {
     }
   }
 
+  # ── Phase 7: gather per-chrom LD files, combine, and generate summary ────────
+  call GatherLd {
+    input:
+      ld_files   = FilterLd.ld,
+      vcor_files = FilterLd.vcor,
+      out_prefix = out_prefix,
+      docker     = exome_docker
+  }
+
   output {
-    Array[Array[File]] merged_plink = MergeChrom.plink
-    Array[File]        ld_results   = FilterLd.ld
-    Array[File]        vcor_results = ComputeLd.vcor
-    Array[File]        merged_vcf   = PlinkToVcf.vcf
+    Array[Array[File]] merged_plink  = MergeChrom.plink
+    Array[File]        ld_results    = FilterLd.ld
+    Array[File]        vcor_results  = FilterLd.vcor
+    Array[File]        merged_vcf    = PlinkToVcf.vcf
+    File               ld_combined   = GatherLd.ld_combined
+    File               vcor_combined = GatherLd.vcor_combined
+    File               ld_stats      = GatherLd.stats
+    Array[File]        figures       = GatherLd.figures
   }
 }
 
@@ -498,18 +513,18 @@ task ComputeLd {
     --bim "$bim" \
     --fam "$fam" \
     --ld-snp-list "$fg_bim" \
-    --r2-unphased ~{ld_params} \
+    --r2-unphased zs ~{ld_params} \
     --memory ~{plink_mem_mb} \
     --threads ~{cpu} \
+    --zst-level 1 \
     --out ld
 
-  bgzip ld.vcor
-  mv ld.vcor.gz ~{out_root}.vcor.gz
-  echo "~{chrom}: $(zcat ~{out_root}.vcor.gz | tail -n+2 | wc -l) raw pairs" >&2
+  mv ld.vcor.zst ~{out_root}.vcor.zst
+  echo "~{chrom}: $(zstdcat ~{out_root}.vcor.zst | tail -n+2 | wc -l) raw pairs" >&2
   >>>
 
   output {
-    File vcor = out_root + ".vcor.gz"
+    File vcor = out_root + ".vcor.zst"
   }
 
   runtime {
@@ -529,20 +544,27 @@ task FilterLd {
   input {
     File   vcor
     File   fg_bim
-    File   script
     String chrom
+    String docker
     File?  annot
+    Float  min_r2  = 0.6
+    Int    mem_gb  = 8
+    Int    disk_gb = 20
   }
 
-  String out = "exome_finngen_ld_" + chrom + ".ld.tsv"
+  String out     = "exome_finngen_ld_" + chrom + ".ld.tsv"
+  String vcor_gz = "exome_finngen_ld_" + chrom + ".vcor.gz"
 
   command <<<
   set -euo pipefail
 
-  python3 ~{script} \
-    --vcor   ~{vcor} \
+  zstd -d ~{vcor} -c | bgzip > ~{vcor_gz}
+
+  python3 /scripts/flag_ld_coding.py \
+    --vcor   ~{vcor_gz} \
     --fg_bim ~{fg_bim} \
     --out    ~{out} \
+    --min_r2 ~{min_r2} \
     ~{if defined(annot) then "--annot " + select_first([annot]) else ""}
 
   bgzip ~{out}
@@ -550,11 +572,14 @@ task FilterLd {
   >>>
 
   output {
-    File ld = out + ".gz"
+    File ld   = out + ".gz"
+    File vcor = vcor_gz
   }
 
   runtime {
-    docker: "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
+    docker: docker
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
   }
 }
 
@@ -600,6 +625,62 @@ task PlinkToVcf {
 
   runtime {
     cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# ---------------------------------------------------------------------------
+# Gather all per-chrom LD outputs: concatenate ld.tsv.gz and vcor.gz, then
+# run summarize_ld.py to produce the stats TSV and four summary figures.
+# ---------------------------------------------------------------------------
+task GatherLd {
+  input {
+    Array[File] ld_files
+    Array[File] vcor_files
+    String      out_prefix
+    String      docker
+    Int         mem_gb  = 16
+  }
+
+  Int disk_gb = length(ld_files) * 2 +10
+
+  command <<<
+  set -euo pipefail
+
+  concat_gz() {
+    local filelist="$1"
+    local out="$2"
+    local first=1
+    while IFS= read -r f; do
+      if [[ $first -eq 1 ]]; then
+        zcat "$f"
+        first=0
+      else
+        zcat "$f" | tail -n+2
+      fi
+    done < "$filelist" | bgzip > "$out"
+  }
+
+  concat_gz ~{write_lines(ld_files)}   ~{out_prefix}.ld.tsv.gz
+  concat_gz ~{write_lines(vcor_files)} ~{out_prefix}.vcor.gz
+
+  python3 /scripts/summarize_ld.py \
+    ~{write_lines(ld_files)} \
+    --prefix ~{out_prefix} \
+    --outdir .
+  >>>
+
+  output {
+    File        ld_combined   = out_prefix + ".ld.tsv.gz"
+    File        vcor_combined = out_prefix + ".vcor.gz"
+    File        stats         = out_prefix + "_ld_stats.tsv"
+    Array[File] figures       = glob(out_prefix + "_fig*.png")
+  }
+
+  runtime {
+    docker: docker
     memory: mem_gb + " GB"
     disks:  "local-disk ~{disk_gb} HDD"
   }
