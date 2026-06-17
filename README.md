@@ -458,15 +458,13 @@ This produces a VEP annotation TSV (or pickle) containing variant IDs and `most_
 
 **Pass 2 — re-run with annotation:**
 
-Re-submit `exome_ld.wdl` adding the `annot` input pointing to the VEP output. The `FilterLd` task will then call `flag_ld_coding.py --annot` and the final `ld_results[]` files will include the `is_fg_coding` / `is_ex_coding` columns.
+Before re-submitting the WDL, run `flag_ld_coding.py` locally once on any single-chromosome `.vcor` file with the annotation TSV. This generates the `.pkl` cache (see the standalone usage in the `flag_ld_coding.py` section above). Upload the `.pkl` to GCS, then re-submit `exome_ld.wdl` pointing `annot` at it. The `FilterLd` task loads the `.pkl` directly and the final `ld_results[]` files will include the `is_fg_coding` / `is_ex_coding` columns.
 
 ```json
 {
-  "exome_ld.annot": "gs://bucket/finngen_R14_exome_vep_annotation.pkl"
+  "exome_ld.annot": "gs://bucket/exome_sites_only_annotated_annot.pkl"
 }
 ```
-
-The `.pkl` cache format is preferred for the re-run since it loads significantly faster than the raw TSV.
 
 ---
 
