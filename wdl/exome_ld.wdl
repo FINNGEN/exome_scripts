@@ -27,7 +27,7 @@ workflow exome_ld {
     String        out_prefix       = "finngen_R14_exome"
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
     Float         min_r2           = 0.6
-    File?         annot                          # optional VEP annotation pkl/TSV
+    File          annot                          # VEP annotation TSV.bgz
     String        exome_docker     = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
     Int           mem_gb           = 36
     Int           cpu              = 8
@@ -140,9 +140,8 @@ workflow exome_ld {
       input:
       vcor_zst = ComputeLd.vcor,
       fg_bim   = FGtoPlink.bim[ci],
-      chrom    = chroms[ci],
       annot    = annot,
-      docker   = exome_docker
+      chrom    = chroms[ci]
     }
 
  
@@ -537,22 +536,19 @@ task ComputeLd {
 
 
 # ---------------------------------------------------------------------------
-# Filter raw plink2 .vcor to FG→exome pairs and optionally flag coding status.
-# Uses flag_ld_coding.py. If annot is provided, adds is_fg_coding/is_ex_coding.
-# Output: exome_finngen_ld_<chrom>.ld.gz
+# Filter raw plink2 .vcor to FG→exome pairs and flag coding status.
 # ---------------------------------------------------------------------------
 task FilterLd {
   input {
     File   vcor_zst
     File   fg_bim
+    File   annot
     String chrom
-    String docker
-    File?  annot
-    Int    mem_gb  = 8
+    Int    mem_gb  = 16
     Int    disk_gb = 20
   }
 
-  String out = "exome_finngen_ld_" + chrom + ".ld.tsv"
+  String out = "exome_finngen_ld_" + chrom + ".ld.tsv.gz"
 
   command <<<
   set -euo pipefail
@@ -560,24 +556,38 @@ task FilterLd {
   zstd -d ~{vcor_zst} -c | bgzip > tmp.vcor.gz
   echo "~{chrom}: $(zcat tmp.vcor.gz | tail -n+2 | wc -l) raw pairs" >&2
 
-  python3 /scripts/flag_ld_coding.py \
-    --vcor   tmp.vcor.gz \
-    --fg_bim ~{fg_bim} \
-    --out    ~{out} \
-    --min_r2 0 \
-    --gz \
-    ~{if defined(annot) then "--annot " + select_first([annot]) else ""}
+  python3 << 'PYEOF'
+  import sys, pandas as pd
 
-  echo "~{chrom}: $(zcat ~{out}.gz | tail -n+2 | wc -l) FG-exome pairs" >&2
+  CODING = {"missense_variant","stop_gained","frameshift_variant","splice_acceptor_variant",
+          "splice_donor_variant","start_lost","stop_lost","inframe_insertion","inframe_deletion"}
+
+  fg_ids = {line.split()[1] for line in open("~{fg_bim}")}
+  print(f"Loaded {len(fg_ids)} FG IDs", file=sys.stderr)
+
+  df = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe'], compression='gzip')
+  coding_snps  = set(df.loc[df['most_severe'].isin(CODING), 'rsid'])
+  fg_index     = pd.Index(fg_ids)
+  coding_index = pd.Index(coding_snps)
+  print(f"Loaded {len(coding_snps)} coding SNPs", file=sys.stderr)
+
+  df = pd.concat(
+    chunk[~chunk['ID_B'].isin(fg_index)].rename(columns={'ID_A':'FG_SNP','ID_B':'EXOME_SNP','UNPHASED_R2':'R2'})
+    for chunk in pd.read_csv("tmp.vcor.gz", sep='\t', chunksize=500_000, usecols=['ID_A','ID_B','UNPHASED_R2'])
+  ).assign(is_fg_coding=lambda d: d['FG_SNP'].isin(coding_index),
+           is_ex_coding=lambda d: d['EXOME_SNP'].isin(coding_index))
+  df.to_csv("~{out}", sep='\t', index=False, compression='gzip')
+  print(f"~{chrom}: {len(df):,} FG-exome pairs written", file=sys.stderr)
+  PYEOF
+
   rm tmp.vcor.gz
   >>>
 
   output {
-    File ld = out + ".gz"
+    File ld = out
   }
 
   runtime {
-    docker: docker
     memory: mem_gb + " GB"
     disks:  "local-disk ~{disk_gb} HDD"
   }

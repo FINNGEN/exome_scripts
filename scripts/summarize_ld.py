@@ -18,12 +18,16 @@ NOTE: handles \r\n line endings in input files (transitional, to be removed).
 """
 
 import argparse
+import os
 import re
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -39,16 +43,24 @@ def chrom_sort_key(c):
 
 
 
-def read_ld(path, min_r2=0.0, nrows=None):
+def read_ld(path, nrows=None):
+    print(f"Reading {path} ...", file=sys.stderr)
     chunks = []
+    pbar = tqdm(unit=' rows', unit_scale=True, desc='Reading', file=sys.stderr)
     for chunk in pd.read_csv(path, sep='\t', chunksize=200_000, nrows=nrows):
-        if min_r2 > 0:
-            chunk = chunk[chunk['R2'] >= min_r2]
         for col in ('is_fg_coding', 'is_ex_coding'):
             if col in chunk.columns and chunk[col].dtype == object:
-                chunk[col] = chunk[col].map({'True': True, 'False': False})
+                chunk[col] = chunk[col].map({'True': True, 'False': False}).astype('bool')
+        chunk['R2'] = chunk['R2'].astype('float32')
+        chunk['chrom'] = [s.split('_')[0].removeprefix('chr') for s in chunk['FG_SNP']]
         chunks.append(chunk)
-    return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+        pbar.update(len(chunk))
+    pbar.close()
+    df = pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+    for col in ('FG_SNP', 'EXOME_SNP'):
+        if col in df.columns:
+            df[col] = df[col].astype('category')
+    return df
 
 
 # ── stats ─────────────────────────────────────────────────────────────────────
@@ -207,25 +219,39 @@ def main():
     pfx = f"{args.prefix}_r{args.min_r2}_" if args.prefix else f"r{args.min_r2}_"
     r2_label = f"R²≥{args.min_r2}"
 
-    print(f"Reading {args.input_file}"
-          + (f" [test: {args.test} rows]" if args.test else ""), file=sys.stderr)
-    df = read_ld(args.input_file, min_r2=args.min_r2, nrows=args.test)
-
     filtered_path = outdir / f'{pfx}ld.tsv.gz'
-    df.to_csv(filtered_path, sep='\t', index=False, compression='gzip')
-    print(f"Filtered pairs written to {filtered_path}", file=sys.stderr)
+    cache_path    = outdir / f'{pfx}df.pkl'
 
-    df['chrom'] = df['FG_SNP'].str.split(r'[_:]').str[0].str.replace(r'^chr', '', regex=True)
+    if cache_path.exists():
+        print(f"Loading cached dataframe from {cache_path} ...", file=sys.stderr)
+        df = pd.read_pickle(cache_path)
+        mem_gb = df.memory_usage(deep=True).sum() / 1e9
+        print(f"Loaded {len(df):,} rows from cache — {mem_gb:.2f} GB in memory", file=sys.stderr)
+    else:
+        if not filtered_path.exists():
+            cmd = (f"zcat {shlex.quote(str(args.input_file))}"
+                   f" | awk 'NR==1 || $3 >= {args.min_r2}'"
+                   f" | bgzip -@ {os.cpu_count()} > {shlex.quote(str(filtered_path))}")
+            print(f"Filtering with awk: {cmd}", file=sys.stderr)
+            subprocess.run(cmd, shell=True, check=True)
+            print(f"Filtered pairs written to {filtered_path}", file=sys.stderr)
+        df = read_ld(filtered_path, nrows=args.test)
+        mem_gb = df.memory_usage(deep=True).sum() / 1e9
+        print(f"Loaded {len(df):,} rows — {mem_gb:.2f} GB in memory", file=sys.stderr)
+        print(f"Caching dataframe to {cache_path} ...", file=sys.stderr)
+        df.to_pickle(cache_path)
 
-    chroms = sorted(df['chrom'].unique(), key=chrom_sort_key)
+    groups = {chrom: cdf for chrom, cdf in df.groupby('chrom', sort=False)}
+    chroms = sorted(groups.keys(), key=chrom_sort_key)
     print(f"Chroms found: {chroms}", file=sys.stderr)
 
     stats_rows = []
     r2_data = {k: [] for k in ('both_coding', 'fg_only', 'ex_only', 'neither')}
     rng = np.random.default_rng(seed=42)
 
-    for chrom in chroms:
-        cdf = df[df['chrom'] == chrom]
+    for i, chrom in enumerate(chroms):
+        print(f"Processing chrom {chrom} ({i+1}/{len(chroms)}) ...", file=sys.stderr)
+        cdf = groups[chrom]
         stats_rows.append(compute_stats(cdf, chrom))
 
         masks = {
@@ -256,9 +282,13 @@ def main():
             arr = rng.choice(arr, cap, replace=False)
         r2_capped[k] = arr
 
+    print("Generating fig1_variants ...", file=sys.stderr)
     fig1_variants(stats, outdir, pfx, r2_label)
+    print("Generating fig2_pairs ...", file=sys.stderr)
     fig2_pairs(stats, outdir, pfx, r2_label)
+    print("Generating fig3_r2_dist ...", file=sys.stderr)
     fig3_r2_dist(r2_capped, outdir, pfx, r2_label)
+    print("Generating fig4_coding_frac ...", file=sys.stderr)
     fig4_coding_frac(stats, outdir, pfx, r2_label)
 
     print("Done.", file=sys.stderr)
