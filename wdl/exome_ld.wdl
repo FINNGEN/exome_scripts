@@ -642,6 +642,7 @@ task GatherLd {
     Float       min_r2
     String      docker
     Int         mem_gb  = 16
+    Int         cpu     = 4
   }
 
   Int disk_gb = length(ld_files) * 2 + 10
@@ -649,10 +650,11 @@ task GatherLd {
   command <<<
   set -euo pipefail
 
-  filelist=~{write_lines(ld_files)}
-  { zcat "$(head -n1 "$filelist")" | head -n1
-    while IFS= read -r f; do zcat "$f" | sed -E '1d'; done < "$filelist"
-  } | bgzip > ~{out_prefix}.ld.tsv.gz
+  { zcat ~{ld_files[0]} | sed -n '1p'
+    for f in ~{sep=' ' ld_files}; do
+      zcat "$f" | sed -E '1d'
+    done
+  } | bgzip -@ ~{cpu} > ~{out_prefix}.ld.tsv.gz
 
   python3 /scripts/summarize_ld.py \
     ~{out_prefix}.ld.tsv.gz \
@@ -663,14 +665,15 @@ task GatherLd {
 
   output {
     File        ld_combined  = out_prefix + ".ld.tsv.gz"
-    File        ld_filtered  = glob(out_prefix + "_r*_ld.tsv.gz")[0]
-    File        stats        = glob(out_prefix + "_r*_ld_stats.tsv")[0]
+    File        ld_filtered  = out_prefix + "_r" + min_r2 + "_ld.tsv.gz"
+    File        stats        = out_prefix + "_r" + min_r2 + "_ld_stats.tsv"
     Array[File] figures      = glob(out_prefix + "_r*_fig*.png")
   }
 
   runtime {
     docker: docker
     memory: mem_gb + " GB"
+    cpu:    cpu
     disks:  "local-disk ~{disk_gb} HDD"
   }
 }
