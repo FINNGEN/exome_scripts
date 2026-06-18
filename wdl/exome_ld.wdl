@@ -28,7 +28,8 @@ workflow exome_ld {
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
     Float         min_r2           = 0.6
     File          annot                          # VEP annotation TSV.bgz
-    String        exome_docker     = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
+    String        filter_docker    = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld.zstd"
+    String        gather_docker    = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld.6"
     Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
@@ -141,7 +142,8 @@ workflow exome_ld {
       vcor_zst = ComputeLd.vcor,
       fg_bim   = FGtoPlink.bim[ci],
       annot    = annot,
-      chrom    = chroms[ci]
+      chrom    = chroms[ci],
+      docker   = filter_docker
     }
 
  
@@ -153,7 +155,7 @@ workflow exome_ld {
       ld_files   = FilterLd.ld,
       out_prefix = out_prefix,
       min_r2     = min_r2,
-      docker     = exome_docker
+      docker     = gather_docker
   }
 
   output {
@@ -544,6 +546,7 @@ task FilterLd {
     File   fg_bim
     File   annot
     String chrom
+    String docker
     Int    mem_gb  = 16
     Int    disk_gb = 20
   }
@@ -588,6 +591,7 @@ task FilterLd {
   }
 
   runtime {
+    docker: docker
     memory: mem_gb + " GB"
     disks:  "local-disk ~{disk_gb} HDD"
   }

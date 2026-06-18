@@ -350,7 +350,7 @@ GatherLd   [after scatter]
 
 7. **ComputeLd** *(scatter over chromosomes)*: Runs `plink2 --r2-unphased zs` on the merged BED using the FG BIM as `--ld-snp-list`, so LD is computed only for pairs where one variant is a FG array variant. The `zs` modifier tells plink2 to write the native `ld.vcor.zst` (zstd-compressed); `--zst-level 1` sets the compression level. No custom docker — runs on the same VM as the other plink tasks.
 
-8. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst` to `.vcor.gz` (bgzip), then calls `scripts/flag_ld_coding.py` to keep only FG→exome pairs with R² ≥ `min_r2` (default 0.6) and optionally annotate coding status. Outputs `exome_finngen_ld_<chrom>.ld.tsv.gz`.
+8. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst` to `.vcor.gz` (bgzip), then runs inline Python to keep only FG→exome pairs (dropping pairs where `ID_B` is a FG variant) and annotate coding status using the VEP annotation file. Outputs `exome_finngen_ld_<chrom>.ld.tsv.gz`.
 
 9. **PlinkToVcf** *(scatter over chromosomes)*: Exports the merged plink BED back to a bgzipped VCF. These VCFs are the input for the VEP annotation step described below.
 
@@ -369,12 +369,12 @@ GatherLd   [after scatter]
   "exome_ld.ld_params":        "--ld-window-kb 1000 --ld-window-r2 0.05",
   "exome_ld.min_r2":           0.6,
   "exome_ld.out_prefix":       "finngen_R14_exome",
-  "exome_ld.annot":            "gs://bucket/vep_annotation.pkl",
-  "exome_ld.exome_docker":     "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld"
+  "exome_ld.annot":            "gs://bucket/vep_annotation.tsv.bgz"
 }
+
 ```
 
-`annot` is optional. `CHROM` in VCF template paths is replaced at runtime with each chromosome name. `min_r2` controls the R² threshold applied in `FilterLd` (default 0.6); note this is separate from `--ld-window-r2` in `ld_params` which is the lower bound passed to plink2 (default 0.05).
+`CHROM` in VCF template paths is replaced at runtime with each chromosome name. `min_r2` controls the R² threshold applied in `GatherLd` (default 0.6); note this is separate from `--ld-window-r2` in `ld_params` which is the lower bound passed to plink2 (default 0.05). Docker images are hardcoded in the WDL (`filter_docker` uses `ld.zstd`, `gather_docker` uses `ld.6`).
 
 **Outputs:**
 

@@ -75,7 +75,6 @@ LD (r²) between FinnGen imputed array SNPs and exome variants is computed genom
 | `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz.tbi` | Index for renamed VCF |
 | `finngen_R14_exome.ld.tsv.gz` | All genome-wide FinnGen–exome LD pairs with coding annotation |
 | `finngen_R14_exome_r[min_r2]_ld.tsv.gz` | LD pairs filtered to r² ≥ [min_r2] |
-| `finngen_R14_exome_r[min_r2]_ld_stats.tsv` | Per-chromosome LD summary statistics |
 
 ### Documentation
 
@@ -84,6 +83,7 @@ LD (r²) between FinnGen imputed array SNPs and exome variants is computed genom
 | File | Description |
 |---|---|
 | `[EXOME_DATASET].QC_ANNOTATED.report.txt` | Per-dataset QC filtering statistics by chromosome |
+| `finngen_R14_exome_r[min_r2]_ld_stats.tsv` | Per-chromosome LD summary statistics |
 
 #### Figures
 
