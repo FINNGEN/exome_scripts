@@ -89,7 +89,7 @@ LD (r²) between FinnGen imputed array SNPs and exome variants is computed genom
 
 | File | Description |
 |---|---|
-| `FG_EXOME_resolved_flowchart.png` | Flowchart of sample ID resolution across datasets |
+| `finngen_R14_exome_resolved_flowchart.png` | Flowchart of sample ID resolution across datasets |
 | `finngen_R14_exome_r[min_r2]_fig1_variants.png` | Unique variants per chromosome, stacked coding/non-coding |
 | `finngen_R14_exome_r[min_r2]_fig2_pairs.png` | LD pair breakdown per chromosome |
 | `finngen_R14_exome_r[min_r2]_fig3_r2_dist.png` | r² distribution by coding category |
