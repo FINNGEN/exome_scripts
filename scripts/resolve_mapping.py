@@ -37,6 +37,9 @@ SUMMARY_GROUPS = [
     ("NO MATCH", "absent from ref or below KING concordance threshold", [
         ("MISSING", "no KING match found"),
     ]),
+    ("EXCLUDED", "removed before KING due to sample-level QC failure", [
+        ("HET_EXCLUDED", "excluded by heterozygosity filter (F > 0.3) prior to KING"),
+    ]),
 ]
 
 # ── Alias loading ─────────────────────────────────────────────────────────────
@@ -86,7 +89,7 @@ def _collect_ref_ids(df):
     ids = set()
     for raw in df["DUPLICATES"].dropna():
         raw = str(raw).strip()
-        if raw in ("MISSING", "nan", ""):
+        if raw in ("MISSING", "HET_EXCLUDED", "nan", ""):
             continue
         for c in raw.split(","):
             c = c.strip()
@@ -107,6 +110,8 @@ def initial_categorise(df, ag=None):
     records = []
     for _, row in df.iterrows():
         dataset, query, raw = row["DATASET"], str(row["QUERY"]).strip(), str(row["DUPLICATES"]).strip()
+        if raw == "HET_EXCLUDED":
+            records.append(_row(dataset, query, "NA", "", "HET_EXCLUDED")); continue
         if raw in ("MISSING", "nan", ""):
             records.append(_row(dataset, query, "NA", "", "MISSING")); continue
         seen, cands = set(), []
@@ -226,6 +231,7 @@ def make_flowchart(df_init, df_final, outpath):
     c_uniq  = sc(df_init, "UNIQUE")
     c_ambig = sc(df_init, "AMBIGUOUS_UNRESOLVED")
     c_miss  = sc(df_init, "MISSING")
+    c_het   = sc(df_init, "HET_EXCLUDED")
 
     c_clean = (sc(df_final, "ID_CONFIRMED") + sc(df_final, "RESOLVED_BY_ID") +
                sc(df_final, "RESOLVED_BY_ALIAS") + sc(df_final, "UNIQUE"))
@@ -233,14 +239,15 @@ def make_flowchart(df_init, df_final, outpath):
     c_cdrop = sc(df_final, "CONFLICT_DROPPED")
     c_ambr  = sc(df_final, "AMBIGUOUS_UNRESOLVED")
 
-    n_matched = c_clean + c_ckept
-    n_dropped = c_cdrop + c_ambr
-    n_nomatch = c_miss
+    n_matched  = c_clean + c_ckept
+    n_dropped  = c_cdrop + c_ambr
+    n_nomatch  = c_miss
+    n_excluded = c_het
 
     # ── colours ─────────────────────────────────────────────────────────
     C_GD = "#2e7d32"; C_GM = "#66bb6a"; C_GL = "#a5d6a7"
     C_YL = "#fff176"; C_SL = "#ffcdd2"; C_RL = "#e53935"
-    C_RD = "#b71c1c"; C_GR = "#bdbdbd"
+    C_RD = "#b71c1c"; C_GR = "#bdbdbd"; C_BL = "#546e7a"
     # Dataset colours — avoid greens/reds already used for status
     DS_PALETTE = ["#4e79a7","#f28e2b","#76b7b2","#b07aa1",
                   "#edc948","#ff9da7","#9c755f","#bab0ac"]
@@ -264,11 +271,13 @@ def make_flowchart(df_init, df_final, outpath):
     ])
 
     # Map s1 band keys → STATUS prefix for per-dataset flow computation
-    S1_PREFIX = {"miss": "MISSING", "ambig": "AMBIGUOUS_UNRESOLVED",
-                 "uniq": "UNIQUE",  "ral":   "RESOLVED_BY_ALIAS",
-                 "rid":  "RESOLVED_BY_ID",   "id": "ID_CONFIRMED"}
+    S1_PREFIX = {"het":   "HET_EXCLUDED",
+                 "miss":  "MISSING",        "ambig": "AMBIGUOUS_UNRESOLVED",
+                 "uniq":  "UNIQUE",         "ral":   "RESOLVED_BY_ALIAS",
+                 "rid":   "RESOLVED_BY_ID", "id":    "ID_CONFIRMED"}
 
     s1 = _bands(
+        ("het",   c_het,   C_BL, "#263238", f"HET_EXCLUDED\n({c_het:,})"),
         ("miss",  c_miss,  C_GR, "#757575", f"MISSING ({c_miss:,})"),
         ("ambig", c_ambig, C_YL, "#f9a825", f"AMBIG_UNRESOLVED\n({c_ambig:,})"),
         ("uniq",  c_uniq,  C_YL, "#f9a825",  f"UNIQUE ({c_uniq:,})"),
@@ -278,6 +287,7 @@ def make_flowchart(df_init, df_final, outpath):
     )
 
     s2 = _bands(
+        ("het2",   c_het,   C_BL, "#263238", f"HET_EXCLUDED\n({c_het:,})"),
         ("miss2",  c_miss,  C_GR, "#757575", f"MISSING ({c_miss:,})"),
         ("ambr",   c_ambr,  C_RL, C_RD,      f"AMBIG_UNRESOLVED\n({c_ambr:,})"),
         ("cdrop",  c_cdrop, C_SL, C_RD,      f"CONFLICT_DROPPED\n({c_cdrop:,})"),
@@ -286,9 +296,10 @@ def make_flowchart(df_init, df_final, outpath):
     )
 
     s3 = _bands(
-        ("nomatch", n_nomatch, C_RD, "#7f0000", f"NO MATCH\n{n_nomatch:,}\n{_pct(n_nomatch,n)}"),
-        ("dropped", n_dropped, C_RL, C_RD,      f"DROPPED\n{n_dropped:,}\n{_pct(n_dropped,n)}"),
-        ("matched", n_matched, C_GD, "#1b5e20",  f"MATCHED\n{n_matched:,}\n{_pct(n_matched,n)}"),
+        ("excl",    n_excluded, C_BL, "#263238", f"EXCLUDED\n{n_excluded:,}\n{_pct(n_excluded,n)}"),
+        ("nomatch", n_nomatch,  C_RD, "#7f0000", f"NO MATCH\n{n_nomatch:,}\n{_pct(n_nomatch,n)}"),
+        ("dropped", n_dropped,  C_RL, C_RD,      f"DROPPED\n{n_dropped:,}\n{_pct(n_dropped,n)}"),
+        ("matched", n_matched,  C_GD, "#1b5e20",  f"MATCHED\n{n_matched:,}\n{_pct(n_matched,n)}"),
     )
 
     # ── Flow definitions: (src_key, dst_key, count, colour) ─────────────
@@ -326,8 +337,10 @@ def make_flowchart(df_init, df_final, outpath):
         if cl > 0:  flows_12.append((k, "clean", cl, cl_col))
     if c_ambr: flows_12.append(("ambig", "ambr",  c_ambr, C_RL))
     if c_miss: flows_12.append(("miss",  "miss2", c_miss, C_GR))
+    if c_het:  flows_12.append(("het",   "het2",  c_het,  C_BL))
 
     flows_23 = []
+    if c_het:   flows_23.append(("het2",  "excl",    c_het,   C_BL))
     if c_miss:  flows_23.append(("miss2", "nomatch", c_miss,  C_RD))
     if c_ambr:  flows_23.append(("ambr",  "dropped", c_ambr,  C_RL))
     if c_cdrop: flows_23.append(("cdrop", "dropped", c_cdrop, C_RL))
@@ -552,6 +565,8 @@ def main():
             "QRY007":     ("UNIQUE",                  "REF006"),
             "QRY008":     ("MISSING",                 "NA"),
             "QRY011":     ("AMBIGUOUS_UNRESOLVED",    "AMBIGUOUS"),
+            "QRY_HET1":   ("HET_EXCLUDED",            "NA"),
+            "QRY_HET2":   ("HET_EXCLUDED",            "NA"),
         }
         out_map = result.set_index("QUERY")[["STATUS","REF_MAPPED"]]
         ok = fail = 0

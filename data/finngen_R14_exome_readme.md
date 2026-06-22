@@ -41,9 +41,10 @@ Exome sample IDs were mapped to FinnGen IDs through a genotype-based identity ma
 - **`RESOLVED_BY_ALIAS`**: multiple candidates found, but all belong to the same alias group. Aliases are known FinnGen ID equivalences (e.g. individuals enrolled under different IDs across biobanks or sequencing batches) provided as an external file. The ambiguity is resolved by treating the group as a single identity.
 - **`AMBIGUOUS_UNRESOLVED`**: multiple candidates with no alias resolution — sample excluded.
 - **`MISSING`**: no genetic match found — sample excluded.
+- **`HET_EXCLUDED`**: sample removed before KING due to high heterozygosity (F > 0.3); genotype data deemed unreliable for identity matching — sample excluded.
 - **`CONFLICT_KEPT/DROPPED`**: when multiple exome samples from different datasets resolve to the same FinnGen ID, a priority tiebreak is applied (`ID_CONFIRMED` > `RESOLVED_BY_ALIAS` > `RESOLVED_BY_ID` > `UNIQUE`). The highest-priority match is kept; the rest are dropped.
 
-The resulting mapping is stored in `/home/pete/fg-3/exome_v2/release/data/finngen_R14_exome_id_mapping.tsv`. Each QC-annotated VCF is then subset to confirmed samples and reheadered with FinnGen IDs, producing a per-chromosome VCF per dataset. A flowchart visualising the resolution process across all datasets is available in the Documentation/Figures section.
+The resulting mapping is stored in `finngen_R14_exome_id_mapping.tsv` (see File structure below). Each QC-annotated VCF is then subset to confirmed samples and reheadered with FinnGen IDs, producing a per-chromosome VCF per dataset. A flowchart visualising the resolution process across all datasets is available in the Documentation/Figures section.
 
 #### ID mapping summary
 
@@ -73,33 +74,29 @@ LD (r²) between FinnGen imputed array SNPs and exome variants is computed genom
 
 ## File structure
 
-### Data
+| File | Description |
+|---|---|
+| `data/finngen_R14_exome_id_mapping.tsv` | QRY→REF sample ID mapping with resolution status for all datasets |
+| `data/qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz` | QC-filtered and normalised VCF for each input dataset |
+| `data/qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz.tbi` | Index for QC-filtered VCF |
+| `data/renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz` | Per-chromosome VCF with FinnGen sample IDs |
+| `data/renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz.tbi` | Index for renamed VCF |
+| `data/finngen_R14_exome.ld.tsv.gz` | All genome-wide FinnGen–exome LD pairs with coding annotation |
+| `data/finngen_R14_exome_r[min_r2]_ld.tsv.gz` | LD pairs filtered to r² ≥ [min_r2] |
+
+### Logs
 
 | File | Description |
 |---|---|
-| `/home/pete/fg-3/exome_v2/release/data/finngen_R14_exome_id_mapping.tsv` | QRY→REF sample ID mapping with resolution status for all datasets |
-| `qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz` | QC-filtered and normalised VCF for each input dataset |
-| `qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz.tbi` | Index for QC-filtered VCF |
-| `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz` | Per-chromosome VCF with FinnGen sample IDs |
-| `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz.tbi` | Index for renamed VCF |
-| `finngen_R14_exome.ld.tsv.gz` | All genome-wide FinnGen–exome LD pairs with coding annotation |
-| `finngen_R14_exome_r[min_r2]_ld.tsv.gz` | LD pairs filtered to r² ≥ [min_r2] |
+| `documentation/[EXOME_DATASET].QC_ANNOTATED.report.txt` | Per-dataset QC filtering statistics by chromosome |
+| `documentation/finngen_R14_exome_r[min_r2]_ld_stats.tsv` | Per-chromosome LD summary statistics |
 
-### Documentation
-
-#### Logs
+### Figures
 
 | File | Description |
 |---|---|
-| `[EXOME_DATASET].QC_ANNOTATED.report.txt` | Per-dataset QC filtering statistics by chromosome |
-| `finngen_R14_exome_r[min_r2]_ld_stats.tsv` | Per-chromosome LD summary statistics |
-
-#### Figures
-
-| File | Description |
-|---|---|
-| `finngen_R14_exome_resolved_flowchart.png` | Flowchart of sample ID resolution across datasets |
-| `finngen_R14_exome_r[min_r2]_fig1_variants.png` | Unique variants per chromosome, stacked coding/non-coding |
-| `finngen_R14_exome_r[min_r2]_fig2_pairs.png` | LD pair breakdown per chromosome |
-| `finngen_R14_exome_r[min_r2]_fig3_r2_dist.png` | r² distribution by coding category |
-| `finngen_R14_exome_r[min_r2]_fig4_coding_frac.png` | Coding fraction per chromosome |
+| `documentation/finngen_R14_exome_id_mapping_flowchart.png` | Flowchart of sample ID resolution across datasets |
+| `documentation/finngen_R14_exome_r[min_r2]_fig1_variants.png` | Unique variants per chromosome, stacked coding/non-coding |
+| `documentation/finngen_R14_exome_r[min_r2]_fig2_pairs.png` | LD pair breakdown per chromosome |
+| `documentation/finngen_R14_exome_r[min_r2]_fig3_r2_dist.png` | r² distribution by coding category |
+| `documentation/finngen_R14_exome_r[min_r2]_fig4_coding_frac.png` | Coding fraction per chromosome |

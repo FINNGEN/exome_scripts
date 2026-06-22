@@ -5,7 +5,8 @@
 | MATCHED | 43302 | 619 | 7031 | 12233 | 23419 | 95.4% | samples with a final QRY→REF mapping in the output |
 | DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | found by KING but excluded from final mapping |
 | NO MATCH | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
-| TOTAL | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
+| EXCLUDED | 5 | 0 | 0 | 0 | 5 | 0.0% | removed before KING due to sample-level QC failure |
+| TOTAL | 45399 | 629 | 7164 | 12405 | 25201 | 100.0% |  |
 
 ## Mapping Breakdown
 
@@ -18,3 +19,4 @@
 | MATCHED | CONFLICT_KEPT | 1377 | 12 | 7 | 304 | 1054 | 3.0% | contested ref ID; kept after priority tiebreak; 1377 ref IDs contested, avg 31.4 queries/ref |
 | DROPPED | CONFLICT_DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
 | NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
+| EXCLUDED | HET_EXCLUDED | 5 | 0 | 0 | 0 | 5 | 0.0% | excluded by heterozygosity filter (F > 0.3) prior to KING |

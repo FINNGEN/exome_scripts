@@ -1,5 +1,5 @@
 {
-    "exome_rename.resolved_mapping": "gs://fg-3/exome_v2/data/FG_EXOME_resolved.tsv",
+    "exome_rename.resolved_mapping": "gs://fg-3/exome_v2/data/finngen_R14_exome_id_mapping.tsv",
     "exome_rename.chunk_mb": 2000,
     "exome_rename.suffix": "fg_ids",
     #Test mode, remove to run all of them

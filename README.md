@@ -14,7 +14,8 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 | MATCHED | 43302 | 619 | 7031 | 12233 | 23419 | 95.4% | samples with a final QRY→REF mapping in the output |
 | DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | found by KING but excluded from final mapping |
 | NO MATCH | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
-| TOTAL | 45394 | 629 | 7164 | 12405 | 25196 | 100.0% |  |
+| EXCLUDED | 5 | 0 | 0 | 0 | 5 | 0.0% | removed before KING by heterozygosity filter (F > max_het_F) |
+| TOTAL | 45399 | 629 | 7164 | 12405 | 25201 | 100.0% |  |
 
 ## Mapping Breakdown
 
@@ -31,7 +32,7 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ### Mapping flowchart
 
-![Mapping flowchart](data/FG_EXOME_resolved_flowchart.png)
+![Mapping flowchart](data/finngen_R14_exome_id_mapping_flowchart.png)
 
 
 
@@ -93,22 +94,22 @@ MakeRegionSnplists
 
 8. **KingShards**: Runs `king --duplicate` across all query-chunk × ref-chunk pairs sequentially within the task. Filters the `.con` output to only cross-dataset pairs (one sample has the query prefix on IID, the other does not), merges, and gzips the result.
 
-9. **SummarizeKing**: Uses FID (never prefixed) to join the merged `.con.gz` against the query `.fam`, producing a per-sample TSV: each row is one query sample with a comma-separated list of matching reference FIDs, or `MISSING` if none found. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
+9. **SummarizeKing**: Uses FID (never prefixed) to join the merged `.con.gz` against the query `.fam`, producing a per-sample TSV: each row is one query sample with a comma-separated list of matching reference FIDs, or `MISSING` if none found. Samples removed by the heterozygosity filter in PrepQuery (F > `max_het_F`) are absent from the `.fam` and would be silently dropped; they are re-injected at the end of the summary with status `HET_EXCLUDED` so they appear in all downstream outputs including the flowchart. Also generates a concordance diagnostic PNG (concordance distribution, IBS0 vs concordance scatter, SNP count per pair).
 
-10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries, adds a `DATASET` column (query prefix only), and concatenates into an intermediate `{plink_prefix}_EXOME_summary.tsv`. Stacks concordance PNGs into `{plink_prefix}_EXOME_concordance.png`. Then runs the resolve_mapping logic — with optional alias file for twin disambiguation — to produce `{plink_prefix}_EXOME_resolved.tsv`, `_stats.tsv`, and `_stats.md`.
+10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries, adds a `DATASET` column (query prefix only), and concatenates into an intermediate `{out_prefix}_combined_summary.tsv`. Stacks concordance PNGs into `{out_prefix}_concordance.png`. Then runs the resolve_mapping logic — with optional alias file for twin disambiguation — to produce `{out_prefix}_id_mapping.tsv`, `_id_mapping_stats.tsv`, `_id_mapping_stats.md`, and `_id_mapping_flowchart.png`.
 
 **Inputs:**
 
 ```json
 {
-  "exome_duplicates.vcf_pairs":    [["ADPKD", "gs://bucket/adpkd.vcf.gz"]],
-  "exome_duplicates.plink_bed":    "gs://bucket/finngen_R14_hm3.bed",
-  "exome_duplicates.plink_prefix": "FG",
-  "exome_duplicates.aliases":      "gs://bucket/finngen_R14_duplicate_list.txt",
-  "exome_duplicates.n_regions":    100,
-  "exome_duplicates.target_snps":  10000,
-  "exome_duplicates.max_het_F":    0.3,
-  "exome_duplicates.chunk_size":   10000
+  "exome_duplicates.vcf_pairs":   [["ADPKD", "gs://bucket/adpkd.vcf.gz"]],
+  "exome_duplicates.plink_bed":   "gs://bucket/finngen_R14_hm3.bed",
+  "exome_duplicates.out_prefix":  "finngen_R14_exome",
+  "exome_duplicates.aliases":     "gs://bucket/finngen_R14_duplicate_list.txt",
+  "exome_duplicates.n_regions":   100,
+  "exome_duplicates.target_snps": 10000,
+  "exome_duplicates.max_het_F":   0.3,
+  "exome_duplicates.chunk_size":  10000
 }
 ```
 
@@ -123,10 +124,11 @@ MakeRegionSnplists
 - `summary[]`: Per-sample TSV — one query sample per row, matched reference IDs or `MISSING`
 - `concordance_plots[]`: Per-dataset concordance diagnostic PNGs
 - `excluded_samples_query[]` / `excluded_samples_ref[]`: Het-outlier samples removed before KING
-- `combined_plot`: `{plink_prefix}_EXOME_concordance.png` — all concordance PNGs stacked
-- `resolved_mapping`: `{plink_prefix}_EXOME_resolved.tsv` — final QRY→REF mapping with columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`, `ALIAS_NOTE`
-- `resolved_stats_tsv`: `{plink_prefix}_EXOME_resolved_stats.tsv` — group totals + per-status breakdown with per-dataset counts
-- `resolved_stats_md`: `{plink_prefix}_EXOME_resolved_stats.md` — same stats in Markdown, ready to paste into this README
+- `combined_plot`: `{out_prefix}_concordance.png` — all concordance PNGs stacked
+- `id_mapping`: `{out_prefix}_id_mapping.tsv` — final QRY→REF mapping with columns `QUERY`, `REF_MAPPED`, `DATASET`, `STATUS`, `CANDIDATES`, `ALIAS_NOTE`
+- `id_mapping_stats`: `{out_prefix}_id_mapping_stats.tsv` — group totals + per-status breakdown with per-dataset counts
+- `id_mapping_md`: `{out_prefix}_id_mapping_stats.md` — same stats in Markdown, ready to paste into this README
+- `id_mapping_flowchart`: `{out_prefix}_id_mapping_flowchart.png` — Sankey diagram of resolution flow across all datasets
 
 ---
 
@@ -158,6 +160,7 @@ Handles two real-world complications: twins in the reference (one query matches 
 | **MATCHED** | `ID_CONFIRMED`, `RESOLVED_BY_ID`, `RESOLVED_BY_ALIAS`, `UNIQUE`, `CONFLICT_KEPT[...]` | Has a final QRY→REF mapping in the output |
 | **DROPPED** | `CONFLICT_DROPPED[...]`, `AMBIGUOUS_UNRESOLVED` | Found by KING but excluded from final mapping |
 | **NO MATCH** | `MISSING` | No KING match found |
+| **EXCLUDED** | `HET_EXCLUDED` | Removed before KING due to sample-level QC failure |
 
 **Alias handling** — an optional tab-delimited file lists known alias groups (one group per line, space/tab-separated). For each REF candidate, the script checks whether the query starts with any member of that candidate's alias group. This naturally handles suffix variants (e.g. `FGXXXXX_dup1`) without requiring them to be registered in the alias file. A single matching candidate → `RESOLVED_BY_ALIAS`; multiple matching candidates → `AMBIGUOUS_UNRESOLVED`. Alias IDs cannot appear in `REF_MAPPED`; a post-processing check enforces this.
 
@@ -190,6 +193,8 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 | ds2 | QRY009 | REF007 |
 | ds2 | QRY010 | REF007 |
 | ds2 | QRY011 | REF008,REF009 |
+| ds2 | QRY_HET1 | HET_EXCLUDED |
+| ds2 | QRY_HET2 | HET_EXCLUDED |
 
 ### Aliases
 
@@ -219,6 +224,8 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 | ds2 | QRY009 | REF007 | REF007 | CONFLICT_KEPT[UNIQUE] | — |
 | ds2 | QRY010 | REF007 | NA | CONFLICT_DROPPED[UNIQUE] | — |
 | ds2 | QRY011 | REF008,REF009 | AMBIGUOUS | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | query_not_in_alias_file |
+| ds2 | QRY_HET1 | HET_EXCLUDED | NA | HET_EXCLUDED[HET_EXCLUDED] | — |
+| ds2 | QRY_HET2 | HET_EXCLUDED | NA | HET_EXCLUDED[HET_EXCLUDED] | — |
 
 ### Checks
 
@@ -238,9 +245,11 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 | QRY007 | UNIQUE[UNIQUE] | REF006 | ✓ |
 | QRY008 | MISSING[MISSING] | NA | ✓ |
 | QRY011 | AMBIGUOUS_UNRESOLVED[AMBIGUOUS_UNRESOLVED] | AMBIGUOUS | ✓ |
+| QRY_HET1 | HET_EXCLUDED[HET_EXCLUDED] | NA | ✓ |
+| QRY_HET2 | HET_EXCLUDED[HET_EXCLUDED] | NA | ✓ |
 | QRY009+QRY010 | 1×CONFLICT_KEPT + 1×CONFLICT_DROPPED | — | ✓ |
 
-**15/15 checks — all passed**
+**17/17 checks — all passed**
 <!-- END:test/output.md -->
 
 ---

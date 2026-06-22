@@ -11,6 +11,7 @@ workflow exome_duplicates {
     Int    target_snps   = 10000
     Float  max_het_F     = 0.3
     Int    chunk_size    = 10000
+    String out_prefix    = "finngen_R14_exome"
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
@@ -96,25 +97,26 @@ workflow exome_duplicates {
         duplicates_con = KingShards.duplicates_con,
         query_fam      = PrepQuery.plink[2],
         query_prefix   = vcf_pairs[i][0],
-        ref_prefix     = plink_prefix
+        ref_prefix     = plink_prefix,
+        het_excluded   = PrepQuery.excluded_samples
     }
   }
 
   call GatherResults {
     input:
-      summaries    = SummarizeKing.summary,
-      plots        = SummarizeKing.plot,
-      plink_prefix = plink_prefix,
-      aliases      = aliases
+      summaries  = SummarizeKing.summary,
+      plots      = SummarizeKing.plot,
+      out_prefix = out_prefix,
+      aliases    = aliases
   }
 
   output {
-    File               combined_summary        = GatherResults.combined_summary
-    File               combined_plot          = GatherResults.combined_plot
-    File               resolved_mapping       = GatherResults.resolved_mapping
-    File               resolved_stats_tsv     = GatherResults.resolved_stats_tsv
-    File               resolved_stats_md      = GatherResults.resolved_stats_md
-    File               resolved_flowchart     = GatherResults.resolved_flowchart
+    File combined_summary     = GatherResults.combined_summary
+    File combined_plot        = GatherResults.combined_plot
+    File id_mapping           = GatherResults.id_mapping
+    File id_mapping_stats     = GatherResults.id_mapping_stats
+    File id_mapping_md        = GatherResults.id_mapping_md
+    File id_mapping_flowchart = GatherResults.id_mapping_flowchart
   }
 }
 
@@ -302,23 +304,26 @@ task ConcatVCF {
 # -----------------------------------------------------------------------
 task SubsetToPlink {
   input {
-    Array[File] input_files  # [vcf.gz] or [bed, bim, fam]
-    File        snp_list
-    String      out_prefix
-    Int         cpu       = 16
+    Array[String] input_files  # [vcf.gz] or [bed, bim, fam]
+    File          snp_list
+    String        out_prefix
+    Int           cpu       = 16
+    Int           disk_gb   = 50
   }
 
-  Int disk_size = ceil(size(input_files[0], 'GB') * 3) + 20
+  Int disk_size = disk_gb
   Int memory_gb = 16
 
   command <<<
   set -euo pipefail
 
   SNP_LIST="~{snp_list}"
-  INPUT_FILE0="~{input_files[0]}"
   OUT_PREFIX="~{out_prefix}"
   CPU=~{cpu}
   TOTAL_MEM_MB=12288
+
+  to_fuse() { echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|'; }
+  INPUT_FILE0=$(to_fuse "~{input_files[0]}")
 
   # normalise snp_list: bim files have 6 columns, extract col 2; plain ID files pass through
   awk 'NF > 1 {print $2} NF == 1 {print $1}' "$SNP_LIST" > _extract.txt
@@ -592,6 +597,7 @@ task SummarizeKing {
     File   query_fam
     String query_prefix
     String ref_prefix
+    File   het_excluded
   }
 
   Int    disk_size  = ceil(size(duplicates_con, 'GB') * 2) + 10
@@ -623,9 +629,12 @@ task SummarizeKing {
     { print $1 "\t" ($1 in m ? m[$1] : "MISSING") }
   ' _matches.txt "$QUERY_FAM" >> "$SUMMARY"
 
-  FOUND=$(awk 'NR>1 && $2!="MISSING"' "$SUMMARY" | wc -l)
+  awk 'NR>1 {print $1 "\tHET_EXCLUDED"}' ~{het_excluded} >> "$SUMMARY"
+
+  FOUND=$(awk 'NR>1 && $2!="MISSING" && $2!="HET_EXCLUDED"' "$SUMMARY" | wc -l)
   TOTAL=$(awk 'NR>1' "$SUMMARY" | wc -l)
-  echo "$FOUND/$TOTAL query samples have duplicates in ref"
+  HET=$(awk 'NR>1 && $2=="HET_EXCLUDED"' "$SUMMARY" | wc -l)
+  echo "$FOUND/$TOTAL query samples have duplicates in ref  ($HET excluded by het filter)"
 
   # Plot concordance diagnostics
   python3 << PYEOF
@@ -686,14 +695,14 @@ task GatherResults {
   input {
     Array[File] summaries
     Array[File] plots
-    String      plink_prefix
+    String      out_prefix
     File?       aliases
-    String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:dup_scripts.2"
+    String      docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:dup.2"
   }
 
   command <<<
   set -euo pipefail
-  PREFIX="~{plink_prefix}_EXOME"
+  PREFIX="~{out_prefix}"
 
   # ── 1. Combine per-dataset summaries into combined_summary.tsv ──────────
   mapfile -t summary_files < "~{write_lines(summaries)}"
@@ -712,17 +721,17 @@ task GatherResults {
   python3 /scripts/resolve_mapping.py \
     "${PREFIX}_combined_summary.tsv" \
     ~{if defined(aliases) then "--aliases " + select_first([aliases]) else ""} \
-    --out "${PREFIX}_resolved.tsv"
+    --out "${PREFIX}_id_mapping.tsv"
 
   >>>
 
   output {
-    File combined_summary    = plink_prefix + "_EXOME_combined_summary.tsv"
-    File combined_plot       = plink_prefix + "_EXOME_concordance.png"
-    File resolved_mapping    = plink_prefix + "_EXOME_resolved.tsv"
-    File resolved_stats_tsv  = plink_prefix + "_EXOME_resolved_stats.tsv"
-    File resolved_stats_md   = plink_prefix + "_EXOME_resolved_stats.md"
-    File resolved_flowchart  = plink_prefix + "_EXOME_resolved_flowchart.png"
+    File combined_summary = out_prefix + "_combined_summary.tsv"
+    File combined_plot    = out_prefix + "_concordance.png"
+    File id_mapping       = out_prefix + "_id_mapping.tsv"
+    File id_mapping_stats = out_prefix + "_id_mapping_stats.tsv"
+    File id_mapping_md    = out_prefix + "_id_mapping_stats.md"
+    File id_mapping_flowchart = out_prefix + "_id_mapping_flowchart.png"
   }
 
   meta {
