@@ -2,23 +2,31 @@
 
 ## finngen_R14 exome data
 
-Exome sequencing data for the Analysis Team and collaborating partners. These data are personal data and must be treated according to the Finnish Personal Data Act 523/1999, EU Data Protection Directive 95/46/EC and EU General Data Protection Regulation (GDPR).
+Exome sequencing data processed from 45,399 samples across four sequencing batches, of which 43,302 were successfully mapped to existing FinnGen IDs. These data are personal data and must be treated according to the Finnish Personal Data Act 523/1999, EU Data Protection Directive 95/46/EC and EU General Data Protection Regulation (GDPR).
 
 > For detailed pipeline documentation and source code, see the [GitHub repository](https://github.com/piotor87/exome_scripts).
 
-The pipeline processes exome datasets from multiple sequencing batches through three main steps: quality control filtering, sample renaming to FinnGen IDs, and LD computation against the FinnGen imputed genotype array.
+The pipeline processes exome datasets from multiple sequencing batches through three main steps: quality control filtering, genetic verification of individual identity and ID mapping to existing FinnGen IDs, and LD computation against the FinnGen imputed genotype array.
+
+| Dataset | Samples |
+|---|---:|
+| finngen_wes_gnomad_v4 | 25,201 |
+| fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly | 12,405 |
+| THLBB2023_14_WES_Botnia | 7,164 |
+| likely_pathogenic_annot_annotated_full_header_fix_resampled | 629 |
+| **Total** | **45,399** |
 
 ---
 
-### Quality Control
+### Processing and minimal QC
 
 Each input exome dataset was independently processed through a per-chromosome QC pipeline run in parallel. The following operations were applied to each chromosome:
 
 - **Chromosome name normalisation**: non-`chr`-prefixed contig names are renamed to the standard `chr` prefix.
 - **FASTA normalisation**: variants are normalised against the GRCh38 reference using `bcftools norm`. Multi-allelic sites are split into biallelic records, indels are left-aligned, and REF mismatches are flagged and excluded.
-- **Genotype masking**: genotypes failing per-call quality criteria are set to missing.
+- **Genotype masking**: genotypes with DP < 10 or GQ < 20 are set to missing.
 - **Tag recalculation**: AC, AN and AF tags are recomputed after masking to reflect the updated genotype counts.
-- **Variant filtering**: variants failing quality thresholds (e.g. AC=0 after masking) are removed.
+- **Variant filtering**: variants with AC = 0 after masking or spanning deletions (ALT="*") are removed.
 - **Variant ID standardisation**: variant IDs are set to `CHROM_POS_REF_ALT` format.
 
 Chromosomes are concatenated in their original order to produce a single QC-annotated VCF per dataset. A per-dataset report summarises the number of variants before and after filtering, by chromosome.
@@ -32,7 +40,7 @@ Exome sample IDs were mapped to FinnGen IDs through a genotype-based identity ma
 - **`RESOLVED_BY_ID`**: multiple candidates found (e.g. twins in the reference); the query ID matched exactly one candidate.
 - **`RESOLVED_BY_ALIAS`**: multiple candidates found, but all belong to the same alias group. Aliases are known FinnGen ID equivalences (e.g. individuals enrolled under different IDs across biobanks or sequencing batches) provided as an external file. The ambiguity is resolved by treating the group as a single identity.
 - **`AMBIGUOUS_UNRESOLVED`**: multiple candidates with no alias resolution — sample excluded.
-- **`MISSING`**: no kinship match found — sample excluded.
+- **`MISSING`**: no genetic match found — sample excluded.
 - **`CONFLICT_KEPT/DROPPED`**: when multiple exome samples from different datasets resolve to the same FinnGen ID, a priority tiebreak is applied (`ID_CONFIRMED` > `RESOLVED_BY_ALIAS` > `RESOLVED_BY_ID` > `UNIQUE`). The highest-priority match is kept; the rest are dropped.
 
 The resulting mapping is stored in `/home/pete/fg-3/exome_v2/release/data/finngen_R14_exome_id_mapping.tsv`. Each QC-annotated VCF is then subset to confirmed samples and reheadered with FinnGen IDs, producing a per-chromosome VCF per dataset. A flowchart visualising the resolution process across all datasets is available in the Documentation/Figures section.
@@ -53,8 +61,9 @@ The resulting mapping is stored in `/home/pete/fg-3/exome_v2/release/data/finnge
 | DROPPED | `CONFLICT_DROPPED` (was `UNIQUE`) | 18 | Contested FinnGen ID; lost tiebreak |
 | DROPPED | `CONFLICT_DROPPED` (was `RESOLVED_BY_ID`) | 6 | Contested FinnGen ID; lost tiebreak |
 | **Total dropped** | | **1,456** | |
-| NO MATCH | `MISSING` | 636 | No KING match found |
-| **Total** | | **45,394** | |
+| NO MATCH | `MISSING` | 636 | No genetic match found |
+| EXCLUDED | `HET_EXCLUDED` | 5 | Excluded by heterozygosity filter (F > 0.3) prior to KING — WES dataset only |
+| **Total** | | **45,399** | |
 
 ### LD
 
