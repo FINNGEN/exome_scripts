@@ -4,7 +4,7 @@
 
 Exome sequencing data processed from 45,399 samples across four sequencing batches, of which 43,302 were successfully mapped to existing FinnGen IDs. These data are personal data and must be treated according to the Finnish Personal Data Act 523/1999, EU Data Protection Directive 95/46/EC and EU General Data Protection Regulation (GDPR).
 
-> For detailed pipeline documentation and source code, see the [GitHub repository](https://github.com/piotor87/exome_scripts).
+> For detailed pipeline documentation and source code, see the [GitHub repository](https://github.com/FINNGEN/exome_scripts)
 
 The pipeline processes exome datasets from multiple sequencing batches through three main steps: quality control filtering, genetic verification of individual identity and ID mapping to existing FinnGen IDs, and LD computation against the FinnGen imputed genotype array.
 
