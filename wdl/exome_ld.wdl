@@ -26,10 +26,8 @@ workflow exome_ld {
     String        plink_merge_args = "--allow-extra-chr"
     String        out_prefix       = "finngen_R14_exome"
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
-    Float         min_r2           = 0.6
     File          annot                          # VEP annotation TSV.bgz
     String        filter_docker    = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld.zstd"
-    String        gather_docker    = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld.6"
     Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
@@ -142,6 +140,7 @@ workflow exome_ld {
       vcor_zst = ComputeLd.vcor,
       fg_bim   = FGtoPlink.bim[ci],
       annot    = annot,
+      afreq    = MergeChrom.afreq,
       chrom    = chroms[ci],
       docker   = filter_docker
     }
@@ -149,23 +148,11 @@ workflow exome_ld {
  
   }
 
-  # ── Phase 7: gather per-chrom LD files, combine, and generate summary ────────
-  call GatherLd {
-    input:
-      ld_files   = FilterLd.ld,
-      out_prefix = out_prefix,
-      min_r2     = min_r2,
-      docker     = gather_docker
-  }
-
   output {
     Array[Array[File]] merged_plink = MergeChrom.plink
+    Array[File]        afreq        = MergeChrom.afreq
     Array[File]        ld_results   = FilterLd.ld
     Array[File]        merged_vcf   = PlinkToVcf.vcf
-    File               ld_combined  = GatherLd.ld_combined
-    File               ld_filtered  = GatherLd.ld_filtered
-    File               ld_stats     = GatherLd.stats
-    Array[File]        figures      = GatherLd.figures
   }
 }
 
@@ -461,6 +448,7 @@ task MergeChrom {
     --bfile      "$fg_prefix" \
     --merge-list merge_list.txt \
     --make-bed \
+    --freq \
     --memory     ~{plink_mem_mb} \
     --threads    ~{cpu} \
     --out        "~{out}" \
@@ -471,6 +459,7 @@ task MergeChrom {
 
   output {
     Array[File] plink = [out + ".bed", out + ".bim", out + ".fam", out + ".log"]
+    File        afreq = out + ".afreq"
   }
 
   runtime {
@@ -545,6 +534,7 @@ task FilterLd {
     File   vcor_zst
     File   fg_bim
     File   annot
+    File   afreq
     String chrom
     String docker
     Int    mem_gb  = 16
@@ -563,24 +553,24 @@ task FilterLd {
   import sys, pandas as pd
 
   CODING = {"missense_variant","stop_gained","frameshift_variant","splice_acceptor_variant",
-          "splice_donor_variant","start_lost","stop_lost","inframe_insertion","inframe_deletion"}
+            "splice_donor_variant","start_lost","stop_lost","inframe_insertion","inframe_deletion"}
 
-  fg_ids = {line.split()[1] for line in open("~{fg_bim}")}
-  print(f"Loaded {len(fg_ids)} FG IDs", file=sys.stderr)
+  fg_ids       = {line.split()[1] for line in open("~{fg_bim}")}
+  annot        = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe'], compression='gzip')
+  conseq_map   = annot[annot['most_severe'].isin(CODING)].drop_duplicates('rsid').set_index('rsid')['most_severe'].to_dict()
+  afreq        = pd.read_csv("~{afreq}", sep='\t')
+  afreq.columns = afreq.columns.str.lstrip('#')
+  af_map       = afreq.set_index('ID')['ALT_FREQS'].to_dict()
+  print(f"~{chrom}: {len(fg_ids)} FG IDs, {len(conseq_map)} coding, {len(af_map)} AF entries", file=sys.stderr)
 
-  df = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe'], compression='gzip')
-  coding_snps  = set(df.loc[df['most_severe'].isin(CODING), 'rsid'])
-  fg_index     = pd.Index(fg_ids)
-  coding_index = pd.Index(coding_snps)
-  print(f"Loaded {len(coding_snps)} coding SNPs", file=sys.stderr)
-
-  df = pd.concat(
-    chunk[~chunk['ID_B'].isin(fg_index)].rename(columns={'ID_A':'FG_SNP','ID_B':'EXOME_SNP','UNPHASED_R2':'R2'})
-    for chunk in pd.read_csv("tmp.vcor.gz", sep='\t', chunksize=500_000, usecols=['ID_A','ID_B','UNPHASED_R2'])
-  ).assign(is_fg_coding=lambda d: d['FG_SNP'].isin(coding_index),
-           is_ex_coding=lambda d: d['EXOME_SNP'].isin(coding_index))
-  df.to_csv("~{out}", sep='\t', index=False, compression='gzip')
-  print(f"~{chrom}: {len(df):,} FG-exome pairs written", file=sys.stderr)
+  import gzip
+  with gzip.open("~{out}", 'wt') as out:
+    for i, chunk in enumerate(pd.read_csv("tmp.vcor.gz", sep='\t', chunksize=500_000, usecols=['ID_A','ID_B','UNPHASED_R2'])):
+      df = chunk[~chunk['ID_B'].isin(fg_ids)].rename(columns={'ID_A':'FG_SNP','ID_B':'EXOME_SNP','UNPHASED_R2':'R2'})
+      df['exome_consequence'] = df['EXOME_SNP'].map(conseq_map).fillna('NA')
+      df['EXOME_AF']          = df['EXOME_SNP'].map(af_map)
+      df.to_csv(out, sep='\t', index=False, header=(i==0))
+  print(f"~{chrom}: done", file=sys.stderr)
   PYEOF
 
   rm tmp.vcor.gz
@@ -644,50 +634,3 @@ task PlinkToVcf {
   }
 }
 
-
-# ---------------------------------------------------------------------------
-# Gather all per-chrom LD outputs: concatenate ld.tsv.gz and vcor.gz, then
-# run summarize_ld.py to produce the stats TSV and four summary figures.
-# ---------------------------------------------------------------------------
-task GatherLd {
-  input {
-    Array[File] ld_files
-    String      out_prefix
-    Float       min_r2
-    String      docker
-    Int         mem_gb  = 16
-    Int         cpu     = 4
-  }
-
-  Int disk_gb = length(ld_files) * 2 + 10
-
-  command <<<
-  set -euo pipefail
-
-  { zcat ~{ld_files[0]} | sed -n '1p'
-    for f in ~{sep=' ' ld_files}; do
-      zcat "$f" | sed -E '1d'
-    done
-  } | bgzip -@ ~{cpu} > ~{out_prefix}.ld.tsv.gz
-
-  python3 /scripts/summarize_ld.py \
-    ~{out_prefix}.ld.tsv.gz \
-    --prefix ~{out_prefix} \
-    --min_r2 ~{min_r2} \
-    --outdir .
-  >>>
-
-  output {
-    File        ld_combined  = out_prefix + ".ld.tsv.gz"
-    File        ld_filtered  = out_prefix + "_r" + min_r2 + "_ld.tsv.gz"
-    File        stats        = out_prefix + "_r" + min_r2 + "_ld_stats.tsv"
-    Array[File] figures      = glob(out_prefix + "_r*_fig*.png")
-  }
-
-  runtime {
-    docker: docker
-    memory: mem_gb + " GB"
-    cpu:    cpu
-    disks:  "local-disk ~{disk_gb} HDD"
-  }
-}

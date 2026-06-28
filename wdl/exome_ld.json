@@ -12,7 +12,6 @@
     #"exome_ld.chroms": ["21","23"],
     "exome_ld.plink_conv_args": "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h",
     "exome_ld.ld_params": "--ld-window-kb 1000 --ld-window-r2 0.05",
-    "exome_ld.min_r2": 0.6,
     "exome_ld.mem_gb": 16,
     "exome_ld.disk_gb": 50,
     "exome_ld.cpu": 16
