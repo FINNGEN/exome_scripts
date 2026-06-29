@@ -168,6 +168,7 @@ workflow exome_ld {
   call GatherAnnotatedLd {
     input:
       annotated_chroms = AnnotateLd.annotated,
+      ld_chroms        = FilterLd.ld,
       out_prefix       = out_prefix,
       docker           = filter_docker
   }
@@ -179,6 +180,7 @@ workflow exome_ld {
     Array[File]        merged_vcf      = PlinkToVcf.vcf
     File               leads_tsv_out   = BuildLeads.leads_tsv
     File               annotated_ld    = GatherAnnotatedLd.annotated
+    File               raw_ld          = GatherAnnotatedLd.raw_ld
   }
 }
 
@@ -416,6 +418,7 @@ task VcfToPlink {
     --out        "~{out_prefix}" \
     ~{plink_conv_args}
 
+  sed -i 's/\tchrX_/\tchr23_/g' "~{out_prefix}.bim"
   echo "~{out_prefix}: $(wc -l < ~{out_prefix}.bim) variants, $(wc -l < ~{out_prefix}.fam) samples" >&2
   >>>
 
@@ -589,6 +592,7 @@ task FilterLd {
 
   fg_ids       = {line.split()[1] for line in open("~{fg_bim}")}
   annot        = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe'], compression='gzip')
+  annot['rsid'] = annot['rsid'].str.replace('chrX_', 'chr23_', regex=False)
   conseq_map   = annot[annot['most_severe'].isin(CODING)].drop_duplicates('rsid').set_index('rsid')['most_severe'].to_dict()
   afreq        = pd.read_csv("~{afreq}", sep='\t')
   afreq.columns = afreq.columns.str.lstrip('#')
@@ -788,36 +792,50 @@ task AnnotateLd {
 # ---------------------------------------------------------------------------
 task GatherAnnotatedLd {
   input {
-    Array[File] annotated_chroms
-    String      out_prefix
-    String      docker
-    Int         mem_gb  = 8
-    Int         disk_gb = 100
+    Array[String] annotated_chroms
+    Array[String] ld_chroms
+    String        out_prefix
+    String        docker
+    Int           mem_gb  = 8
   }
 
-  String out = out_prefix + ".ld_annotated.tsv.gz"
+  String out     = out_prefix + ".ld_annotated.tsv.gz"
+  String out_raw = out_prefix + ".ld.tsv.gz"
 
   command <<<
   set -euo pipefail
 
-  first=true
-  for f in ~{sep=" " annotated_chroms}; do
-    if $first; then
-      zcat "$f"
-      first=false
-    else
-      zcat "$f" | tail -n+2
-    fi
-  done | bgzip -c > ~{out}
+  sed 's|gs://[^/]*/|/mnt/disks/gcs/|' ~{write_lines(annotated_chroms)} > annotated_fuse.txt
+  sed 's|gs://[^/]*/|/mnt/disks/gcs/|' ~{write_lines(ld_chroms)}        > ld_fuse.txt
+
+  mapfile -t annotated_files < annotated_fuse.txt
+  mapfile -t ld_files < ld_fuse.txt
+
+  echo "gathering ${#annotated_files[@]} annotated files" >&2
+  zcat "${annotated_files[0]}" | bgzip -c > ~{out}
+  for f in "${annotated_files[@]:1}"; do
+    echo "annotated: $f" >&2
+    zcat "$f" | sed -E 1d | bgzip -c >> ~{out}
+  done
+  echo "wrote ~{out}" >&2
+
+  echo "gathering ${#ld_files[@]} raw ld files" >&2
+  zcat "${ld_files[0]}" | bgzip -c > ~{out_raw}
+  for f in "${ld_files[@]:1}"; do
+    echo "raw ld: $f" >&2
+    zcat "$f" | sed -E 1d | bgzip -c >> ~{out_raw}
+  done
+  echo "wrote ~{out_raw}" >&2
   >>>
 
   output {
     File annotated = out
+    File raw_ld    = out_raw
   }
 
   runtime {
     docker: docker
     memory: mem_gb + " GB"
-    disks:  "local-disk ~{disk_gb} HDD"
+    disks:  "local-disk 100 HDD"
   }
 }
