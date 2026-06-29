@@ -5,6 +5,7 @@
     ],
     "exome_ld.positions_bim": "gs://finngen-production-library-red/finngen_R14/plink_1.0/data/finngen_R14.bim",
     "exome_ld.annot": "gs://fg-3/exome_v2/data/annotate/exome_sites_only_annotated_annot.tsv.bgz",
+    "exome_ld.credible_groups": "gs://fg-3/exome_v2/inputs/credible_groups.txt",
     "exome_ld.chunk_mb": 600,
 
     "exome_ld.out_prefix": "finngen_R14_exome",

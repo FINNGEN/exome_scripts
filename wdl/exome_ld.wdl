@@ -21,6 +21,7 @@ workflow exome_ld {
     Array[Array[String]] exome_vcf_pairs       # [["PREFIX", "gs://…/chrCHROM.vcf.gz"], …]
     Array[String]        chroms                # e.g. ["1","2",…,"22","23"]
     File                 positions_bim         # plink BIM with all chroms; col1=chrom col4=pos
+    File                 credible_groups   # text file with one group_report gs:// path per line
     Int                  chunk_mb         = 1000
     String        plink_conv_args  = "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h"
     String        plink_merge_args = "--allow-extra-chr"
@@ -31,6 +32,16 @@ workflow exome_ld {
     Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
+  }
+
+  # ── BuildLeads: generate leads table from group reports ─────────────────────
+  Array[File] group_reports = read_lines(credible_groups)
+
+  call BuildLeads {
+    input:
+      group_reports = group_reports,
+      out_prefix    = out_prefix,
+      docker        = filter_docker
   }
 
   # ── Phase 1: build chunk regions + exome union sample list ──────────────────
@@ -145,14 +156,29 @@ workflow exome_ld {
       docker   = filter_docker
     }
 
- 
+    call AnnotateLd {
+      input:
+      leads_tsv = BuildLeads.leads_tsv,
+      ld_file   = FilterLd.ld,
+      docker    = filter_docker
+    }
+
+  }
+
+  call GatherAnnotatedLd {
+    input:
+      annotated_chroms = AnnotateLd.annotated,
+      out_prefix       = out_prefix,
+      docker           = filter_docker
   }
 
   output {
-    Array[Array[File]] merged_plink = MergeChrom.plink
-    Array[File]        afreq        = MergeChrom.afreq
-    Array[File]        ld_results   = FilterLd.ld
-    Array[File]        merged_vcf   = PlinkToVcf.vcf
+    Array[Array[File]] merged_plink    = MergeChrom.plink
+    Array[File]        afreq           = MergeChrom.afreq
+    Array[File]        ld_results      = FilterLd.ld
+    Array[File]        merged_vcf      = PlinkToVcf.vcf
+    File               leads_tsv_out   = BuildLeads.leads_tsv
+    File               annotated_ld    = GatherAnnotatedLd.annotated
   }
 }
 
@@ -448,13 +474,19 @@ task MergeChrom {
     --bfile      "$fg_prefix" \
     --merge-list merge_list.txt \
     --make-bed \
-    --freq \
     --memory     ~{plink_mem_mb} \
     --threads    ~{cpu} \
     --out        "~{out}" \
     ~{plink_merge_args}
 
   echo "~{out}: $(wc -l < ~{out}.bim) variants, $(wc -l < ~{out}.fam) samples" >&2
+
+  plink2 \
+    --bfile   "~{out}" \
+    --freq \
+    --memory  ~{plink_mem_mb} \
+    --threads ~{cpu} \
+    --out     "~{out}"
   >>>
 
   output {
@@ -634,3 +666,158 @@ task PlinkToVcf {
   }
 }
 
+
+# ---------------------------------------------------------------------------
+# Build leads table from FinnGen group reports.
+# ---------------------------------------------------------------------------
+task BuildLeads {
+  input {
+    Array[File] group_reports
+    String      out_prefix
+    String      docker
+    Int         mem_gb  = 16
+    Int         disk_gb = 50
+  }
+
+  command <<<
+  set -euo pipefail
+
+  python3 << 'PYEOF'
+  import sys, pandas as pd
+
+  READ_COLS = ["phenotype_abbreviation", "locus_id", "lead_mlogp", "lead_beta",
+               "lead_af_alt", "good_cs", "best_coding_var", "functional_variants_relaxed"]
+  KEEP_COLS = ["PHENO", "locus_id", "lead_mlogp", "lead_beta", "lead_af_alt", "good_cs"]
+  paths = open("~{write_lines(group_reports)}").read().splitlines()
+  print(f"{len(paths)} group_report files", file=sys.stderr)
+
+  dfs = []
+  for path in paths:
+    try:
+      dfs.append(pd.read_csv(path, sep="\t", usecols=READ_COLS, low_memory=False))
+    except Exception as e:
+      print(f"WARNING: could not read {path}: {e}", file=sys.stderr)
+  df = pd.concat(dfs, ignore_index=True)
+  df = df.rename(columns={"phenotype_abbreviation": "PHENO"})
+
+  has_coding     = df["best_coding_var"].notna()
+  has_functional = df["functional_variants_relaxed"].notna()
+  df["cs_type"] = "NA"
+  df.loc[has_functional & ~has_coding, "cs_type"] = "functional_relaxed"
+  df.loc[has_coding,                   "cs_type"] = "coding"
+
+  def parse(val):
+    if pd.isna(val): return None, None
+    p = val.split(";")[0].split("|")
+    return p[0], float(p[3])
+  parsed = pd.DataFrame(df["functional_variants_relaxed"].map(parse).tolist(),
+                        index=df.index, columns=["functional_var", "functional_var_r2"])
+  df["functional_var"]    = parsed["functional_var"]
+  df["functional_var_r2"] = parsed["functional_var_r2"]
+
+  leads = df[KEEP_COLS + ["cs_type", "functional_var", "functional_var_r2"]]
+  leads.to_csv("~{out_prefix}.leads.tsv.gz", sep="\t", index=False, compression="gzip", na_rep="NA")
+  print(f"{len(leads)} CSs across {leads['PHENO'].nunique()} phenotypes", file=sys.stderr)
+  PYEOF
+  >>>
+
+  output {
+    File leads_tsv = out_prefix + ".leads.tsv.gz"
+  }
+
+  runtime {
+    docker: docker
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# ---------------------------------------------------------------------------
+# Annotate per-chrom LD file by joining to the leads table.
+# ---------------------------------------------------------------------------
+task AnnotateLd {
+  input {
+    File   leads_tsv
+    File   ld_file
+    String docker
+    Int    mem_gb  = 16
+    Int    disk_gb = 50
+  }
+
+  String out = sub(basename(ld_file), "\\.ld\\.tsv\\.gz$", ".ld_annotated.tsv.gz")
+
+  command <<<
+  set -euo pipefail
+
+  python3 << 'PYEOF'
+  import gzip, sys, pandas as pd
+  from tqdm import tqdm
+
+  leads = pd.read_csv("~{leads_tsv}", sep="\t")
+  print(f"{len(leads)} CSs loaded", file=sys.stderr)
+
+  n_rows = 0
+  header_written = False
+  with gzip.open("~{out}", "wt") as out:
+    for chunk in tqdm(pd.read_csv("~{ld_file}", sep="\t", chunksize=500_000),
+                      desc="annotating", unit="chunk", file=sys.stderr):
+      merged = chunk.merge(leads, left_on="FG_SNP", right_on="locus_id", how="inner").drop(columns="locus_id")
+      if not merged.empty:
+        merged.to_csv(out, sep="\t", index=False, header=not header_written, na_rep="NA")
+        header_written = True
+        n_rows += len(merged)
+  print(f"{n_rows} annotated rows written to ~{out}", file=sys.stderr)
+  PYEOF
+  >>>
+
+  output {
+    File annotated = out
+  }
+
+  runtime {
+    docker: docker
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# ---------------------------------------------------------------------------
+# Gather per-chrom annotated LD files into one.
+# ---------------------------------------------------------------------------
+task GatherAnnotatedLd {
+  input {
+    Array[File] annotated_chroms
+    String      out_prefix
+    String      docker
+    Int         mem_gb  = 8
+    Int         disk_gb = 100
+  }
+
+  String out = out_prefix + ".ld_annotated.tsv.gz"
+
+  command <<<
+  set -euo pipefail
+
+  first=true
+  for f in ~{sep=" " annotated_chroms}; do
+    if $first; then
+      zcat "$f"
+      first=false
+    else
+      zcat "$f" | tail -n+2
+    fi
+  done | bgzip -c > ~{out}
+  >>>
+
+  output {
+    File annotated = out
+  }
+
+  runtime {
+    docker: docker
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+  }
+}

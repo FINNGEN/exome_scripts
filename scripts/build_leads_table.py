@@ -1,44 +1,33 @@
 #!/usr/bin/env python3
 """
-Build a leads table of coding-unexplained credible sets from FinnGen group reports.
+Build a leads table from FinnGen group reports and annotate with exome LD.
 
-Produces two output files from a given PREFIX:
-  PREFIX.leads.tsv.gz   — one row per credible set, all coding-unexplained CSs,
-                          columns: phenotype, locus_id, lead_mlogp, lead_beta, good_cs
-                          (cached: if file exists it is read directly on next run)
-  PREFIX.hits.tsv.gz    — one row per unique locus_id, with a hits JSON column
-                          {phenotype: [mlogp, beta], ...} after applying --mlogp
-                          and --good-cs filters
-  PREFIX.annotated.tsv.gz — LD file filtered to non-coding FG / coding exome pairs,
-                          joined to the hits table on FG_SNP == locus_id;
-                          columns: EXOME_SNP, FG_SNP, R2, hits
+Produces:
+  PREFIX.leads.tsv.gz     — one row per credible set with cs_type annotation
+  PREFIX.leads.pkl        — same, as pickle (cache)
+  PREFIX.annotated.tsv.gz — LD file joined to leads on FG_SNP == locus_id
 
 Usage:
-    build_leads_table.py --credible_groups FILE_LIST --prefix PREFIX [OPTIONS]
-
-    build_leads_table.py --credible_groups groups.txt --prefix r14
-
-    # With filters for the hits table and LD annotation:
     build_leads_table.py --credible_groups groups.txt --prefix r14 \\
-        --ld_file finngen_R14_exome_r0.6_ld.tsv.gz --mlogp 6.0 --good-cs
+        --ld_file exome_finngen_ld.tsv.gz
 
     # Test with first N files (default N=5):
     build_leads_table.py --credible_groups groups.txt --prefix r14 \\
-        --ld_file finngen_R14_exome_r0.6_ld.tsv.gz --test
+        --ld_file exome_finngen_ld.tsv.gz --test
 """
 
 import argparse
-import json
-import os
+import gzip
 import sys
-import tempfile
 
 import pandas as pd
 from tqdm import tqdm
 
 TEST_N = 5
 
-KEEP_COLS = ["phenotype_abbreviation", "locus_id", "lead_mlogp", "lead_beta", "good_cs"]
+READ_COLS = ["phenotype_abbreviation", "locus_id", "lead_mlogp", "lead_beta",
+             "lead_af_alt", "good_cs", "best_coding_var", "functional_variants_relaxed"]
+KEEP_COLS = ["PHENO", "locus_id", "lead_mlogp", "lead_beta", "lead_af_alt", "good_cs"]
 
 
 def read_file_list(path: str) -> list[str]:
@@ -46,83 +35,77 @@ def read_file_list(path: str) -> list[str]:
         return [line.strip() for line in f if line.strip()]
 
 
-def concat_to_tmp(paths: list[str]) -> str:
-    """Concatenate all group_report files into one temp TSV, keeping a single header."""
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", suffix=".tsv", dir="/tmp", delete=False, prefix="group_reports_"
-    )
-    header_written = False
-    for path in tqdm(paths, desc="Concatenating", unit="file", file=sys.stderr):
+def concat_to_df(paths: list[str]) -> pd.DataFrame:
+    dfs = []
+    for path in tqdm(paths, desc="Reading", unit="file", file=sys.stderr):
         try:
-            with open(path) as f:
-                header = f.readline()
-                if not header_written:
-                    tmp.write(header)
-                    header_written = True
-                tmp.write(f.read())
+            dfs.append(pd.read_csv(path, sep="\t", usecols=READ_COLS, low_memory=False))
         except Exception as e:
             print(f"  WARNING: could not read {path}: {e}", file=sys.stderr)
-    tmp.close()
-    return tmp.name
+    return pd.concat(dfs, ignore_index=True)
 
 
-def build_leads(tmp_path: str) -> pd.DataFrame:
-    print(f"Reading concatenated file {tmp_path}", file=sys.stderr)
-    df = pd.read_csv(tmp_path, sep="\t", low_memory=False)
-    mask = df["best_coding_var"].isna() | (df["best_coding_var"].astype(str).str.strip() == "NA")
-    return df[mask][KEEP_COLS].copy()
+def _parse_functional_first(series: pd.Series) -> pd.DataFrame:
+    """Extract variant name and r2 from the first entry of functional_variants_relaxed.
+
+    Format: variant|consequence|gene|r2;...
+    """
+    def parse(val):
+        if pd.isna(val):
+            return None, None
+        first = val.split(";")[0]
+        parts = first.split("|")
+        return parts[0], float(parts[3])
+
+    parsed = series.map(parse)
+    return pd.DataFrame(parsed.tolist(), index=series.index, columns=["functional_var", "functional_var_r2"])
 
 
-def load_ld(ld_file: str, ld_cache_path: str) -> pd.DataFrame:
-    if os.path.exists(ld_cache_path):
-        print(f"Loading cached LD table from {ld_cache_path}", file=sys.stderr)
-        return pd.read_csv(ld_cache_path, sep="\t")
+def build_leads(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.rename(columns={"phenotype_abbreviation": "PHENO"})
+
+    has_coding     = df["best_coding_var"].notna()
+    has_functional = df["functional_variants_relaxed"].notna()
+
+    df["cs_type"] = "NA"
+    df.loc[has_functional & ~has_coding, "cs_type"] = "functional_relaxed"
+    df.loc[has_coding,                   "cs_type"] = "coding"
+
+    parsed = _parse_functional_first(df["functional_variants_relaxed"])
+    df["functional_var"]    = parsed["functional_var"]
+    df["functional_var_r2"] = parsed["functional_var_r2"]
+
+    return df[KEEP_COLS + ["cs_type", "functional_var", "functional_var_r2"]].copy()
+
+
+def build_annotated(ld_file: str, leads: pd.DataFrame, out_path: str, chunksize: int = 500_000) -> tuple[int, int]:
+    """Read LD file in chunks, join each to leads, write directly to gzipped output."""
+    n_rows = 0
+    unique_exome: set = set()
+    header_written = False
+
     print(f"Reading LD file {ld_file}", file=sys.stderr)
-    ld = pd.read_csv(ld_file, sep="\t")
-    ld = ld[(ld["is_fg_coding"] == False) & (ld["is_ex_coding"] == True)]
-    print(f"  {len(ld)} non-coding FG / coding exome LD pairs", file=sys.stderr)
-    ld.to_csv(ld_cache_path, sep="\t", index=False, compression="gzip")
-    print(f"LD cache written to {ld_cache_path}", file=sys.stderr)
-    return ld
+    with gzip.open(out_path, "wt") as out:
+        for chunk in tqdm(pd.read_csv(ld_file, sep="\t", chunksize=chunksize),
+                          desc="Joining LD", unit="chunk", file=sys.stderr):
+            merged = chunk.merge(leads, left_on="FG_SNP", right_on="locus_id", how="inner").drop(columns="locus_id")
+            if not merged.empty:
+                merged.to_csv(out, sep="\t", index=False, header=not header_written, na_rep="NA")
+                header_written = True
+                n_rows += len(merged)
+                unique_exome.update(merged["EXOME_SNP"])
 
-
-def build_annotated(ld: pd.DataFrame, hits: pd.DataFrame) -> pd.DataFrame:
-    merged = ld.merge(hits, left_on="FG_SNP", right_on="locus_id", how="inner")
-    return merged[["EXOME_SNP", "FG_SNP", "R2", "hits"]]
-
-
-def build_hits(leads: pd.DataFrame) -> pd.DataFrame:
-    hits: dict[str, dict] = {}
-    for _, row in leads.iterrows():
-        locus = row["locus_id"]
-        if locus not in hits:
-            hits[locus] = {}
-        hits[locus][row["phenotype_abbreviation"]] = [round(row["lead_mlogp"], 4), round(row["lead_beta"], 4)]
-
-    return pd.DataFrame([
-        {"locus_id": locus, "hits": json.dumps(d)}
-        for locus, d in hits.items()
-    ])
+    return n_rows, len(unique_exome)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--credible_groups", required=True, metavar="FILE",
                         help="Text file with one group_report path per line")
     parser.add_argument("--ld_file", required=True, metavar="FILE",
-                        help="Exome LD TSV (gzipped); columns: FG_SNP, EXOME_SNP, R2, is_fg_coding, is_ex_coding")
+                        help="Exome LD TSV (gzipped); columns: FG_SNP, EXOME_SNP, R2, exome_consequence, EXOME_AF")
     parser.add_argument("--prefix", required=True, metavar="PREFIX",
-                        help="Output prefix; generates PREFIX.leads.tsv.gz, PREFIX.hits.tsv.gz, PREFIX.annotated.tsv.gz")
-    parser.add_argument(
-        "--mlogp", type=float, default=None, metavar="THRESH",
-        help="Minimum lead_mlogp for the hits table (default: no filter)",
-    )
-    parser.add_argument(
-        "--good-cs", action="store_true",
-        help="Restrict hits table to good_cs == True",
-    )
+                        help="Output prefix; generates PREFIX.leads.tsv.gz and PREFIX.annotated.tsv.gz")
     parser.add_argument(
         "--test", type=int, default=None, metavar="N",
         help=f"Process only the first N files (default when flag omitted: {TEST_N})",
@@ -130,15 +113,14 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    leads_path = f"{args.prefix}.leads.tsv.gz"
-    hits_path = f"{args.prefix}.hits.tsv.gz"
-    ld_cache_path = f"{args.prefix}.ld_noncoding.tsv.gz"
+    leads_pkl      = f"{args.prefix}.leads.pkl"
+    leads_path     = f"{args.prefix}.leads.tsv.gz"
     annotated_path = f"{args.prefix}.annotated.tsv.gz"
 
     # --- Step 1: leads table (cached) ---
-    if os.path.exists(leads_path):
-        print(f"Loading cached leads table from {leads_path}", file=sys.stderr)
-        leads = pd.read_csv(leads_path, sep="\t")
+    if os.path.exists(leads_pkl):
+        print(f"Loading cached leads from {leads_pkl}", file=sys.stderr)
+        leads = pd.read_pickle(leads_pkl)
     else:
         paths = read_file_list(args.credible_groups)
         if args.test is not None:
@@ -147,50 +129,24 @@ def main() -> None:
         else:
             print(f"{len(paths)} group_report files to process", file=sys.stderr)
 
-        tmp_path = concat_to_tmp(paths)
-        try:
-            leads = build_leads(tmp_path)
-        finally:
-            os.unlink(tmp_path)
+        raw = concat_to_df(paths)
+        leads = build_leads(raw)
 
         if leads.empty:
-            print("No rows passed filters — exiting.", file=sys.stderr)
+            print("No rows — exiting.", file=sys.stderr)
             return
 
-        leads.to_csv(leads_path, sep="\t", index=False, compression="gzip")
-        print(f"Leads table written to {leads_path}", file=sys.stderr)
+        leads.to_pickle(leads_pkl)
+        print(f"Leads pickle written to {leads_pkl}", file=sys.stderr)
+        leads.to_csv(leads_path, sep="\t", index=False, compression="gzip", na_rep="NA")
+        print(f"Leads TSV written to {leads_path}", file=sys.stderr)
 
-    print(
-        f"  {len(leads)} coding-unexplained CSs across {leads['phenotype_abbreviation'].nunique()} phenotypes",
-        file=sys.stderr,
-    )
+    print(f"  {len(leads)} CSs across {leads['PHENO'].nunique()} phenotypes", file=sys.stderr)
 
-    # --- Step 2: hits table (cached, filtered) ---
-    if os.path.exists(hits_path):
-        print(f"Loading cached hits table from {hits_path}", file=sys.stderr)
-        hits = pd.read_csv(hits_path, sep="\t")
-    else:
-        filtered = leads.copy()
-        if args.good_cs:
-            filtered = filtered[filtered["good_cs"] == True]
-            print(f"  After good_cs filter: {len(filtered)} rows", file=sys.stderr)
-        if args.mlogp is not None:
-            filtered = filtered[filtered["lead_mlogp"] >= args.mlogp]
-            print(f"  After mlogp >= {args.mlogp} filter: {len(filtered)} rows", file=sys.stderr)
-
-        hits = build_hits(filtered)
-        hits.to_csv(hits_path, sep="\t", index=False, compression="gzip")
-        print(f"Hits table written to {hits_path}  ({len(hits)} unique loci)", file=sys.stderr)
-
-    # --- Step 3: annotated LD table ---
-    ld = load_ld(args.ld_file, ld_cache_path)
-    annotated = build_annotated(ld, hits)
-    annotated.to_csv(annotated_path, sep="\t", index=False, compression="gzip")
-    print(
-        f"Annotated table written to {annotated_path}  "
-        f"({len(annotated)} rows, {annotated['EXOME_SNP'].nunique()} unique exome variants)",
-        file=sys.stderr,
-    )
+    # --- Step 2: annotated LD table ---
+    n_rows, n_exome = build_annotated(args.ld_file, leads, annotated_path)
+    print(f"Annotated table written to {annotated_path}  ({n_rows} rows, {n_exome} unique exome variants)",
+          file=sys.stderr)
 
 
 if __name__ == "__main__":
