@@ -66,7 +66,23 @@ The resulting mapping is stored in `finngen_R14_exome_id_mapping.tsv` (see File 
 | EXCLUDED | `HET_EXCLUDED` | 5 | Excluded by heterozygosity filter (F > 0.3) prior to KING — WES dataset only |
 | **Total** | | **45,399** | |
 
-### Annotated LD
+### FG/Exome LD
+
+LD between FinnGen array variants and exome-private variants is computed genome-wide (r² ≥ 0.05, within a 1 Mb window) using plink2 `--r2-unphased` on the merged FG + exome plink dataset. Two files are produced — a raw LD file and a version annotated with FinnGen credible set data — both covering all chromosomes 1–23 in a single file.
+
+#### Raw LD (`finngen_R14_exome.ld.tsv.gz`)
+
+All FG→exome LD pairs passing the r² threshold. Columns:
+
+| Column | Description |
+|---|---|
+| `FG_SNP` | FinnGen array variant |
+| `EXOME_SNP` | Exome variant in LD |
+| `R2` | Unphased r² between the pair |
+| `exome_consequence` | Most severe VEP consequence for the exome variant |
+| `EXOME_AF` | Allele frequency of the exome variant in the merged dataset |
+
+#### Annotated LD (`finngen_R14_exome.ld_annotated.tsv.gz`)
 
 For each FinnGen credible set lead variant, exome variants in LD (r² ≥ 0.05, within a 1 Mb window) are reported alongside phenotype and credible set annotation. The file has one row per (FG lead variant, exome variant, phenotype) triple — the same LD pair is duplicated across all phenotypes for which that FG variant is a credible set lead. Columns:
 
@@ -103,6 +119,7 @@ FinnGen imputed array variants and exome variants are jointly converted to plink
 | `qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz.tbi` | Index for QC-filtered VCF |
 | `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz` | Per-chromosome VCF with FinnGen sample IDs |
 | `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz.tbi` | Index for renamed VCF |
+| `finngen_R14_exome.ld.tsv.gz` | All FG→exome LD pairs (r² ≥ 0.05, 1 Mb window), genome-wide; annotated with VEP consequence and allele frequency |
 | `finngen_R14_exome.ld_annotated.tsv.gz` | Exome variants in LD with FinnGen credible set leads, annotated with phenotype and credible set metadata (~900k rows) |
 | `plink_fg_merged_chr/finngen_R14_exome_chr[N].bed` | Per-chromosome merged plink BED (FG array + exome variants, 43,302 samples, chr1–23) |
 | `plink_fg_merged_chr/finngen_R14_exome_chr[N].bim` | BIM file; variant IDs in `CHROM_POS_REF_ALT` format; ~31.1 M variants genome-wide |

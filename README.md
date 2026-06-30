@@ -349,7 +349,8 @@ MergeChrom ×n_chroms
 
 GatherAnnotatedLd   [after scatter]
       concatenates all per-chrom ld_annotated.tsv.gz files into one genome-wide file;
-      outputs {out_prefix}.ld_annotated.tsv.gz
+      concatenates all per-chrom ld.tsv.gz files into one genome-wide raw LD file;
+      outputs {out_prefix}.ld_annotated.tsv.gz and {out_prefix}.ld.tsv.gz
 ```
 
 **Step-by-step:**
@@ -376,7 +377,7 @@ GatherAnnotatedLd   [after scatter]
 
 11. **PlinkToVcf** *(scatter over chromosomes)*: Exports the merged plink BED back to a bgzipped VCF. These VCFs are the input for the VEP annotation step described below.
 
-12. **GatherAnnotatedLd**: Concatenates all per-chrom `ld_annotated.tsv.gz` files (header kept from the first chrom) into a single genome-wide file `{out_prefix}.ld_annotated.tsv.gz`.
+12. **GatherAnnotatedLd**: Concatenates all per-chrom `ld_annotated.tsv.gz` files (header kept from the first chrom) into a single genome-wide file `{out_prefix}.ld_annotated.tsv.gz`. Also concatenates all per-chrom `ld.tsv.gz` files into a single genome-wide raw LD file `{out_prefix}.ld.tsv.gz`.
 
 **Inputs:**
 
@@ -404,6 +405,7 @@ GatherAnnotatedLd   [after scatter]
 - `ld_results[]`: Per-chrom `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs with `exome_consequence` and `EXOME_AF`
 - `merged_vcf[]`: Per-chromosome bgzipped VCFs of the merged plink data (used as input to VEP)
 - `leads_tsv_out`: `{out_prefix}.leads.tsv.gz` — all FinnGen credible sets annotated with `cs_type`, `functional_var`, `functional_var_r2`
+- `raw_ld`: `{out_prefix}.ld.tsv.gz` — genome-wide FG→exome LD pairs with `exome_consequence` and `EXOME_AF`; all chromosomes merged into one file
 - `annotated_ld`: `{out_prefix}.ld_annotated.tsv.gz` — genome-wide LD pairs joined to the leads table; one row per (FG lead, exome variant, phenotype)
 
 ---
