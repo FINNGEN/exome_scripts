@@ -371,7 +371,7 @@ GatherAnnotatedLd   [after scatter]
 
 8. **ComputeLd** *(scatter over chromosomes)*: Runs `plink2 --r2-unphased zs` on the merged BED using the FG BIM as `--ld-snp-list`, so LD is computed only for pairs where one variant is a FG array variant. The `zs` modifier writes the native `.vcor.zst` (zstd-compressed); `--zst-level 1` sets the compression level.
 
-9. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst`, keeps only FG→exome pairs, annotates each exome variant with its most severe VEP consequence (`exome_consequence`) and allele frequency (`EXOME_AF`). Outputs `exome_finngen_ld_<chrom>.ld.tsv.gz` with columns: `FG_SNP`, `EXOME_SNP`, `R2`, `exome_consequence`, `EXOME_AF`.
+9. **FilterLd** *(scatter over chromosomes)*: Decompresses the `.vcor.zst`, keeps only FG→exome pairs, annotates each exome variant with its most severe VEP consequence (`exome_consequence`), allele frequency (`EXOME_AF`), and nearest/most severe gene (`exome_nearest_gene`, from the VEP annotation's `gene_most_severe` column). Outputs `exome_finngen_ld_<chrom>.ld.tsv.gz` with columns: `FG_SNP`, `EXOME_SNP`, `R2`, `exome_consequence`, `EXOME_AF`, `exome_nearest_gene`.
 
 10. **AnnotateLd** *(scatter over chromosomes)*: Joins the per-chrom LD file to the leads table on `FG_SNP == locus_id` in 500k-row chunks. Each output row is one LD pair enriched with all leads columns — including `PHENO`, `cs_type`, `functional_var`, `functional_var_r2` — duplicated across phenotypes where the same locus is a lead in multiple phenotypes. Outputs `exome_finngen_ld_<chrom>.ld_annotated.tsv.gz`.
 
@@ -402,10 +402,10 @@ GatherAnnotatedLd   [after scatter]
 
 - `merged_plink[][]`: Per-chromosome merged plink filesets (BED/BIM/FAM/log) — FG + all exome datasets combined
 - `afreq[]`: Per-chromosome allele frequency files from the merged plink data
-- `ld_results[]`: Per-chrom `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs with `exome_consequence` and `EXOME_AF`
+- `ld_results[]`: Per-chrom `exome_finngen_ld_<chrom>.ld.tsv.gz` — FG→exome pairs with `exome_consequence`, `EXOME_AF`, and `exome_nearest_gene`
 - `merged_vcf[]`: Per-chromosome bgzipped VCFs of the merged plink data (used as input to VEP)
 - `leads_tsv_out`: `{out_prefix}.leads.tsv.gz` — all FinnGen credible sets annotated with `cs_type`, `functional_var`, `functional_var_r2`
-- `raw_ld`: `{out_prefix}.ld.tsv.gz` — genome-wide FG→exome LD pairs with `exome_consequence` and `EXOME_AF`; all chromosomes merged into one file
+- `raw_ld`: `{out_prefix}.ld.tsv.gz` — genome-wide FG→exome LD pairs with `exome_consequence`, `EXOME_AF`, and `exome_nearest_gene`; all chromosomes merged into one file
 - `annotated_ld`: `{out_prefix}.ld_annotated.tsv.gz` — genome-wide LD pairs joined to the leads table; one row per (FG lead, exome variant, phenotype)
 
 ---

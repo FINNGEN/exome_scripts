@@ -591,9 +591,10 @@ task FilterLd {
             "splice_donor_variant","start_lost","stop_lost","inframe_insertion","inframe_deletion"}
 
   fg_ids       = {line.split()[1] for line in open("~{fg_bim}")}
-  annot        = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe'], compression='gzip')
+  annot        = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe','gene_most_severe'], compression='gzip')
   annot['rsid'] = annot['rsid'].str.replace('chrX_', 'chr23_', regex=False)
   conseq_map   = annot[annot['most_severe'].isin(CODING)].drop_duplicates('rsid').set_index('rsid')['most_severe'].to_dict()
+  gene_map     = annot.drop_duplicates('rsid').set_index('rsid')['gene_most_severe'].to_dict()
   afreq        = pd.read_csv("~{afreq}", sep='\t')
   afreq.columns = afreq.columns.str.lstrip('#')
   af_map       = afreq.set_index('ID')['ALT_FREQS'].to_dict()
@@ -603,8 +604,9 @@ task FilterLd {
   with gzip.open("~{out}", 'wt') as out:
     for i, chunk in enumerate(pd.read_csv("tmp.vcor.gz", sep='\t', chunksize=500_000, usecols=['ID_A','ID_B','UNPHASED_R2'])):
       df = chunk[~chunk['ID_B'].isin(fg_ids)].rename(columns={'ID_A':'FG_SNP','ID_B':'EXOME_SNP','UNPHASED_R2':'R2'})
-      df['exome_consequence'] = df['EXOME_SNP'].map(conseq_map).fillna('NA')
-      df['EXOME_AF']          = df['EXOME_SNP'].map(af_map)
+      df['exome_consequence']  = df['EXOME_SNP'].map(conseq_map).fillna('NA')
+      df['EXOME_AF']           = df['EXOME_SNP'].map(af_map)
+      df['exome_nearest_gene'] = df['EXOME_SNP'].map(gene_map)
       df.to_csv(out, sep='\t', index=False, header=(i==0))
   print(f"~{chrom}: done", file=sys.stderr)
   PYEOF

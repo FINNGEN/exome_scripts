@@ -81,6 +81,7 @@ All FG→exome LD pairs passing the r² threshold. Columns:
 | `R2` | Unphased r² between the pair |
 | `exome_consequence` | Most severe VEP consequence for the exome variant |
 | `EXOME_AF` | Allele frequency of the exome variant in the merged dataset |
+| `exome_nearest_gene` | Gene corresponding to the exome variant's most severe VEP consequence |
 
 #### Annotated LD (`finngen_R14_exome.ld_annotated.tsv.gz`)
 
@@ -93,6 +94,7 @@ For each FinnGen credible set lead variant, exome variants in LD (r² ≥ 0.05, 
 | `R2` | Unphased r² between the pair |
 | `exome_consequence` | Most severe VEP consequence for the exome variant (`NA` if non-coding) |
 | `EXOME_AF` | Allele frequency of the exome variant in the merged dataset |
+| `exome_nearest_gene` | Gene corresponding to the exome variant's most severe VEP consequence |
 | `PHENO` | FinnGen phenotype abbreviation |
 | `lead_mlogp` | –log₁₀(p) of the lead variant for this phenotype |
 | `lead_beta` | Effect size (beta) of the lead variant |
