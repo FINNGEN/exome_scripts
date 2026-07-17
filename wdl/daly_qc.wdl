@@ -59,8 +59,7 @@ workflow daly_qc {
 
   call SortAndMerge {
     input:
-      vcf_files      = ParallelFilter.filtered_vcf,
-      vcf_tbi_files  = ParallelFilter.filtered_vcf_tbi,
+      vcf_files      = ParallelFilter.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
       summary_report = SummaryStats.report,
       root_name      = SummaryStats.root_name,
       cpu_count      = cpu_count
@@ -87,11 +86,11 @@ task ComputeStats {
 
   command <<<
   set -euo pipefail
-  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+  fuse_vcf=$(echo "~{vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
 
-  chrom=$(bcftools index -s "~{vcf}" | head -n 1 | cut -f1)
-  variant_count=$(bcftools index -s "~{vcf}" | awk '{sum+=$3} END {print sum}')
-  n_samples=$(bcftools query -l "~{vcf}" | wc -l)
+  chrom=$(bcftools index -s "$fuse_vcf" | head -n 1 | cut -f1)
+  variant_count=$(bcftools index -s "$fuse_vcf" | awk '{sum+=$3} END {print sum}')
+  n_samples=$(bcftools query -l "$fuse_vcf" | wc -l)
 
   echo "Chromosome:    $chrom"
   echo "Variants:      $variant_count"
@@ -136,8 +135,7 @@ task AnnotateAndRename {
 
   command <<<
   set -euo pipefail
-  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-  VCF="~{vcf}"
+  VCF=$(echo "~{vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
   OUT="~{out_name}"
 
   # ── 1. Fetch remote header ────────────────────────────────────────────
@@ -251,16 +249,16 @@ task ParallelFilter {
     Int    chunk_multiplier = 3
   }
 
-  Int disk_gb = vcf_max_gb * 2 + 20  # N chunk outputs + filtered VCF; input streamed from GCS
+  Int disk_gb = vcf_max_gb * 2 + 20  # N chunk outputs + filtered VCF; input read via GCS FUSE
 
   command <<<
   set -euo pipefail
-  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
-  CHUNKS=$(( ~{cpu_count} * ~{chunk_multiplier} ))   # more smaller chunks to stay within GCS auth token window
+  fuse_vcf=$(echo "~{input_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+  CHUNKS=$(( ~{cpu_count} * ~{chunk_multiplier} ))   # chunk count now purely for parallelism (FUSE has no auth-token expiry window)
 
   # ── 1. Get chromosome and contig length from index ───────────────────
-  chrom=$(bcftools index -s "~{input_vcf}" | awk '{print $1; exit}')
-  contig_len=$(bcftools index -s "~{input_vcf}" | awk '{print $2; exit}')
+  chrom=$(bcftools index -s "$fuse_vcf" | awk '{print $1; exit}')
+  contig_len=$(bcftools index -s "$fuse_vcf" | awk '{print $2; exit}')
   echo "Contig: $chrom  length: $contig_len  chunks: $CHUNKS"
 
   # ── 2. Build chunk BED files spanning the full contig ────────────────
@@ -279,7 +277,7 @@ task ParallelFilter {
   for i in $(seq 0 $(( CHUNKS - 1 ))); do
       bed="chunk_$(printf '%02d' $i).bed"
       out="chunk_$(printf '%02d' $i).vcf.gz"
-      echo "export GCS_OAUTH_TOKEN=\$(gcloud auth application-default print-access-token) && bcftools view '~{input_vcf}' -R $bed -Ou | bcftools view -e \"~{filter_expression}\" -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o $out && echo \"done chunk $i / $((CHUNKS-1))\""
+      echo "bcftools view '$fuse_vcf' -R $bed -Ou | bcftools view -e \"~{filter_expression}\" -Ou | bcftools annotate --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz -o $out && echo \"done chunk $i / $((CHUNKS-1))\""
   done > chunks.sh
 
   parallel -j $(nproc) < chunks.sh
@@ -328,7 +326,7 @@ task ValidateFiltering {
 
   command <<<
   set -euo pipefail
-  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+  fuse_filtered_vcf=$(echo "~{filtered_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
 
   echo "=== Validating VCF Filtering ===" > report.txt
   echo "" >> report.txt
@@ -345,7 +343,7 @@ task ValidateFiltering {
 
   # ── Test 1: no variants matching filter expression remain ─────────────
   echo "Test 1: Filter expression check (~{filter_expression})" >> report.txt
-  bcftools view -H -i '~{filter_expression}' "~{filtered_vcf}" 2>/dev/null \
+  bcftools view -H -i '~{filter_expression}' "$fuse_filtered_vcf" 2>/dev/null \
       | head -n 1 > check_filter.txt 2>/dev/null || true
   if [[ -s check_filter.txt ]]; then
       echo "✗ FAIL: Found variants matching filter expression (should be 0)" >> report.txt
@@ -356,7 +354,7 @@ task ValidateFiltering {
 
   # ── Test 2: variant ID format (CHROM_POS_REF_ALT) ────────────────────
   echo "Test 2: Variant ID format check" >> report.txt
-  bcftools view -H "~{filtered_vcf}" 2>/dev/null \
+  bcftools view -H "$fuse_filtered_vcf" 2>/dev/null \
       | head -n 1 > check_id.txt 2>/dev/null || true
   sample_id=$(awk '{print $3}' check_id.txt)
   if [[ "$sample_id" =~ ^[^_]+_[0-9]+_.+_.+$ ]]; then
@@ -456,21 +454,18 @@ task SummaryStats {
 
 task SortAndMerge {
   input {
-    Array[File] vcf_files
-    Array[File] vcf_tbi_files
-    File        summary_report
-    String      root_name
-    Int         cpu_count = 8
+    Array[String] vcf_files   # Array[File] coerced to Array[String] at call site — no localisation
+    File          summary_report
+    String        root_name
+    Int           cpu_count = 8
+    Int           disk_gb   = 100
   }
-
-  Int disk_size = ceil(size(vcf_files, 'GB') * 2) + 50
 
   command <<<
   set -euo pipefail
-  touch ~{sep=' ' vcf_tbi_files}
 
   # Use WDL scatter order — chromosome order is guaranteed by vcf_list input order.
-  cat ~{write_lines(vcf_files)} > vcf_list.txt
+  sed 's|gs://[^/]*/|/mnt/disks/gcs/|' ~{write_lines(vcf_files)} > vcf_list.txt
   echo "Merging ~{length(vcf_files)} VCFs in scatter order"
 
   bcftools concat -n -f vcf_list.txt -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
@@ -488,7 +483,7 @@ task SortAndMerge {
 
   runtime {
     memory:      "8G"
-    disks:       "local-disk ~{disk_size} HDD"
+    disks:       "local-disk ~{disk_gb} HDD"
     cpu:         cpu_count
     preemptible: 1
   }
