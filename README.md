@@ -355,7 +355,7 @@ GatherAnnotatedLd   [after scatter]
 
 **Step-by-step:**
 
-1. **BuildLeads**: Localises all FinnGen R14 group report files (one per phenotype, ~1400 files) listed in `credible_groups`. Concatenates them and annotates each credible set with a `cs_type` column (`coding` / `functional_relaxed` / `NA`) based on the `best_coding_var` and `functional_variants_relaxed` columns. Also extracts the top functional variant name and its r² with the lead (`functional_var`, `functional_var_r2`). Outputs `{out_prefix}.leads.tsv.gz` with columns: `PHENO`, `locus_id`, `lead_mlogp`, `lead_beta`, `lead_af_alt`, `good_cs`, `cs_type`, `functional_var`, `functional_var_r2`.
+1. **BuildLeads**: Localises all FinnGen R14 group report files (one per phenotype, ~1400 files) listed in `credible_groups`. Concatenates them and annotates each credible set with a `cs_type` column (`coding` / `functional_relaxed` / `NA`) based on the `best_coding_var` and `functional_variants_relaxed` columns. Also extracts the top functional variant name and its r² with the lead (`functional_var`, `functional_var_r2`). Outputs `{out_prefix}.leads.tsv.gz` with columns: `PHENO`, `locus_id`, `lead_mlogp`, `lead_beta`, `lead_af_alt`, `good_cs`, `cs_log_bayes_factor`, `cs_type`, `functional_var`, `functional_var_r2`.
 
 2. **BuildFgRegions**: Queries the FG VCF index (no download) to estimate bytes-per-variant and the sample-count ratio between the exome union and the full FG cohort. Uses these to derive a target number of variants per chunk so that each chunk produces approximately `chunk_mb` MB of output. Splits each chromosome's position list from `positions_bim` accordingly and writes a task table with three columns: `fg_vcf_path | chunk_prefix | region`.
 

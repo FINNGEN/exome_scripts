@@ -692,8 +692,10 @@ task BuildLeads {
   import sys, pandas as pd
 
   READ_COLS = ["phenotype_abbreviation", "locus_id", "lead_mlogp", "lead_beta",
-               "lead_af_alt", "good_cs", "best_coding_var", "functional_variants_relaxed"]
-  KEEP_COLS = ["PHENO", "locus_id", "lead_mlogp", "lead_beta", "lead_af_alt", "good_cs"]
+               "lead_af_alt", "good_cs", "cs_log_bayes_factor", "best_coding_var",
+               "functional_variants_relaxed"]
+  KEEP_COLS = ["PHENO", "locus_id", "lead_mlogp", "lead_beta", "lead_af_alt", "good_cs",
+               "cs_log_bayes_factor"]
   paths = open("~{write_lines(group_reports)}").read().splitlines()
   print(f"{len(paths)} group_report files", file=sys.stderr)
 

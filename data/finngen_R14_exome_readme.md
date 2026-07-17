@@ -100,6 +100,7 @@ For each FinnGen credible set lead variant, exome variants in LD (r² ≥ 0.05, 
 | `lead_beta` | Effect size (beta) of the lead variant |
 | `lead_af_alt` | Allele frequency of the lead variant in FinnGen |
 | `good_cs` | Whether the credible set passes quality criteria |
+| `cs_log_bayes_factor` | Log Bayes factor for including this credible set vs. excluding it; collapses (≪ 1) for non-independent CS artifacts |
 | `cs_type` | Credible set classification: `coding` (lead has a coding variant), `functional_relaxed` (relaxed functional variant but no coding), or `NA` (no functional explanation) |
 | `functional_var` | Top functional variant in the credible set (first entry of `functional_variants_relaxed`); `NA` if none |
 | `functional_var_r2` | r² between `functional_var` and the lead; `NA` if none |
