@@ -550,7 +550,7 @@ This repository contains WDL (Workflow Description Language) workflows for proce
    - Recalculates AC (allele count) after genotype filtering
    - Applies variant filters (removes variants with AC=0, etc.)
 5. Validates filtering on sample VCFs (checks filters worked correctly)
-6. Creates summary statistics showing variant counts and drop rates per chromosome
+6. Creates summary statistics showing variant/sample counts and drop rates per chromosome, including samples removed by the denial list
 
 **Key features:**
 
@@ -585,11 +585,11 @@ gs://bucket/chr3.vcf.gz
 
 - `filtered_vcfs[]`: Per-chromosome filtered VCF files
 - `filtered_vcf_tbis[]`: Corresponding index files
-- `merged_vcf`: All chromosomes merged into single VCF
-- `merged_vcf_tbi`: Index for merged VCF
-- `summary_table`: TSV with chromosome-level and total drop rates
-- `original_stats[]`: Variant counts before filtering
-- `filtered_stats[]`: Variant counts after filtering
+- `concatenated_vcf`: All chromosomes merged into single VCF
+- `concatenated_vcf_tbi`: Index for merged VCF
+- `report`: TSV with chromosome-level and total variant drop rates, plus original/filtered sample counts and samples removed by the denial list
+- `original_stats[]`: Variant/sample counts before filtering
+- `filtered_stats[]`: Variant/sample counts after filtering
 - `validation_reports[]`: Per-chromosome validation reports
 
 
@@ -614,7 +614,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
    - Recalculates AC
    - Filters variants by expression
    - Annotates variant IDs as `CHROM_POS_REF_ALT`
-4. Validates filtering worked correctly
+4. Validates filtering worked correctly, including a sample-count check (original vs. filtered sample counts, per VCF) confirming the denial exclusion actually removed samples
 5. Outputs filtered VCF files
 
 **Key differences from wes_chrom.wdl:**
@@ -646,7 +646,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 - `filtered_vcf_tbis[]`: Index files
 - `original_chrom_counts[]`: Variant counts per chromosome (before)
 - `filtered_chrom_counts[]`: Variant counts per chromosome (after)
-- `validation_reports[]`: Validation reports
+- `validation_reports[]`: Validation reports, including original/filtered sample counts and samples removed by the denial list
 
 **How to run:**
 
