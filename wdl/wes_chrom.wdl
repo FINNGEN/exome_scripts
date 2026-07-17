@@ -8,9 +8,23 @@ workflow wes_chrom {
     Int cpu_count
     Int? test_sample_count
     File norm_fasta
+    File denials                  # sample IDs to remove, one per line (see PreFilter)
+    File aliases                  # tab-delimited alias groups (one group per line, same members
+                                   # share a group) — used to expand `denials` to every alias of
+                                   # each denied ID before exclusion, since the ID actually present
+                                   # in a given VCF's header may be an alias rather than the ID
+                                   # recorded in the denials list (see ExpandDenials)
    }
 
   Array[String] vcf_files = read_lines(vcf_list)
+
+  # Expand denials to cover alias variants before any per-chromosome PreFilter call uses it.
+  # Dataset-independent, so this runs once for the whole workflow rather than once per chromosome.
+  call ExpandDenials {
+    input:
+      denials = denials,
+      aliases = aliases
+  }
 
   scatter (vcf in vcf_files) {
     if (defined(test_sample_count)) {
@@ -34,7 +48,8 @@ workflow wes_chrom {
     call PreFilter {
       input:
         input_vcf = vcf_to_filter,
-        cpu_count = cpu_count
+        cpu_count = cpu_count,
+        denials = ExpandDenials.expanded_denials
     }
 
     call ParallelFilterByRegion {
@@ -162,7 +177,11 @@ task ComputeStats {
   # Count total variants
   variant_count=$(wc -l < positions.txt)
   echo "Total variants: $variant_count"
-  
+
+  # Count samples
+  n_samples=$(bcftools query -l "$fuse_vcf" | wc -l)
+  echo "Total samples: $n_samples"
+
   # Cleanup intermediate files
   rm -f region_chunk_*.positions extract_chunk.sh region_chunk_*
   
@@ -174,7 +193,7 @@ task ComputeStats {
   echo "Sample VCF created: $(bcftools view -H sample.vcf.gz | wc -l) variants"
 
   # Create stats file
-  echo -e "variant_count\t$variant_count" > stats.txt
+  printf "variant_count\t%s\nn_samples\t%s\n" "$variant_count" "$n_samples" > stats.txt
 
   echo "=== Complete ==="
   >>>
@@ -194,10 +213,58 @@ task ComputeStats {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Expands a raw denials list (one ID per line) to include every alias of each
+# denied ID, per the alias groups in `aliases` (same tab-delimited group-per-
+# line format as resolve_mapping.py's DEFAULT_ALIASES / load_aliases). Needed
+# because the ID recorded in the denials list and the ID actually present in a
+# given exome VCF's header can be different aliases of the same participant —
+# bcftools view -S ^denials only matches literal strings, so PreFilter would
+# otherwise fail to exclude (or hard-error on) a denied sample whose header ID
+# is an alias rather than the one on the denials list.
+# ---------------------------------------------------------------------------
+task ExpandDenials {
+  input {
+    File denials    # plain list, one ID per line
+    File aliases    # tab-delimited alias groups, one group per line
+  }
+
+  command <<<
+  set -euo pipefail
+  python3 << 'PY'
+denied = {line.strip() for line in open("~{denials}") if line.strip()}
+expanded = set(denied)
+with open("~{aliases}") as fh:
+    for line in fh:
+        ids = [x.strip() for x in line.strip().split("\t") if x.strip()]
+        if len(ids) < 2:
+            continue
+        if denied & set(ids):
+            expanded.update(ids)
+with open("expanded_denials.txt", "w") as out:
+    for id_ in sorted(expanded):
+        out.write(id_ + "\n")
+print(f"Expanded {len(denied)} denied IDs to {len(expanded)} IDs (incl. aliases)")
+PY
+  >>>
+
+  output {
+    File expanded_denials = "expanded_denials.txt"
+  }
+
+  runtime {
+    memory: "2G"
+    disks: "local-disk 10 HDD"
+    cpu: 1
+    preemptible: 1
+  }
+}
+
 task PreFilter {
   input {
     String input_vcf
     Int cpu_count
+    File denials    # sample IDs to remove, one per line
     Int disk_gb = 50
   }
 
@@ -208,11 +275,15 @@ task PreFilter {
   THREADS=$(nproc)
   fuse_vcf=$(echo "~{input_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
 
-  echo "=== Pre-Filter: remove AC==0 and annotate IDs ==="
+  echo "=== Pre-Filter: remove denied samples, AC==0, and annotate IDs ==="
   echo "Input: ~{input_vcf}"
+  echo "Removing denied samples listed in ~{denials}"
+  echo "(--force-samples: denials list may include IDs not present in this VCF's header)"
 
   TARGET_SIZE=$(stat -c%s "$fuse_vcf")
-  bcftools view --threads $THREADS -i 'AC>0' "$fuse_vcf" -Ou | \
+  bcftools view --threads $THREADS -S ^~{denials} --force-samples "$fuse_vcf" -Ou | \
+    bcftools +fill-tags --threads $THREADS -Ou -- -t AC | \
+    bcftools view --threads $THREADS -i 'AC>0' -Ou | \
     bcftools annotate --threads $THREADS --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz | \
     pv -s $TARGET_SIZE -N "prefilter" -i 60 > ~{base_name}.prefiltered.vcf.gz
 
@@ -565,7 +636,7 @@ task SummaryStats {
   echo "Root name: $root"
 
   # Create header
-  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.report.txt
+  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped\toriginal_samples\tfiltered_samples\tsamples_removed" > summary.report.txt
   
   # Process each VCF file
   idx=0
@@ -597,21 +668,27 @@ task SummaryStats {
     else
       pct_dropped="0.00"
     fi
-    
-    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.report.txt
+
+    # Sample count is the same cohort across every chromosome of this dataset —
+    # tracked per-chromosome as a sanity check, not summed into the TOTAL row below.
+    orig_samples=$(grep "n_samples" "$orig_stats_file" | cut -f2)
+    filt_samples=$(grep "n_samples" "$filt_stats_file" | cut -f2)
+    samples_removed=$((orig_samples - filt_samples))
+
+    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}\t${orig_samples}\t${filt_samples}\t${samples_removed}" >> summary.report.txt
     idx=$((idx + 1))
   done < <(cat << 'EOF'
 ~{sep='\n' vcf_file_names}
 EOF
 )
-  
+
   # Add totals row
   echo "" >> summary.report.txt
   total_orig=$(grep "variant_count" ~{sep=' ' original_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_filt=$(grep "variant_count" ~{sep=' ' filtered_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_pct=$(awk "BEGIN {printf \"%.2f\", (($total_orig - $total_filt) / $total_orig) * 100}")
-  
-  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.report.txt
+
+  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}\t${orig_samples}\t${filt_samples}\t${samples_removed}" >> summary.report.txt
   
   echo ""
   echo "Summary Table:"

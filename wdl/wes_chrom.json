@@ -5,6 +5,8 @@
     "wes_chrom.variant_filter": "AC>0 & ALT!=\"*\"",
     #"wes_chrom.test_sample_count": 100
     "wes_chrom.norm_fasta": "gs://juham-fg/lift/broad/Homo_sapiens_assembly38.fasta",
+    "wes_chrom.denials": "gs://thl-incoming-data/from_THL_registerteam/denial_lists/finngen_R14_finngenid_exclusion_list.txt",
+    "wes_chrom.aliases": "gs://fg-3/exome_v2/inputs/finngen_R14_duplicate_list.txt"
 
 }
 
