@@ -169,7 +169,7 @@ task ComputeStats {
   chmod +x extract_chunk.sh
 
   echo "Extracting positions in parallel..."
-  ls region_chunk_* | sort -V | parallel -j $CHUNKS './extract_chunk.sh "$fuse_vcf" {}'
+  ls region_chunk_* | sort -V | parallel -j $CHUNKS "./extract_chunk.sh '$fuse_vcf' {}"
 
   echo "Concatenating and sorting position files..."
   cat region_chunk_*.positions | sort -n -u > positions.txt
