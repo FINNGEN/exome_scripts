@@ -45,11 +45,15 @@ workflow wes_chrom {
         cpu_count = cpu_count
     }
 
+    # size() here is a workflow-level expression: Cromwell resolves it with a metadata
+    # lookup against the GCS object, not a call input, so it never triggers localization
+    # the way a File-typed task input/declaration would.
     call PreFilter {
       input:
         input_vcf = vcf_to_filter,
         cpu_count = cpu_count,
-        denials = ExpandDenials.expanded_denials
+        denials = ExpandDenials.expanded_denials,
+        disk_gb = ceil(size(vcf_to_filter, "GB")) + 20
     }
 
     call ParallelFilterByRegion {
@@ -59,7 +63,8 @@ workflow wes_chrom {
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
         cpu_count = cpu_count,
-        norm_fasta = norm_fasta
+        norm_fasta = norm_fasta,
+        disk_gb = ceil(size(PreFilter.prefiltered_vcf, "GB")) + 20
     }
 
     call ComputeStats as FilteredStats {
@@ -93,7 +98,8 @@ workflow wes_chrom {
     input:
       input_vcfs = ParallelFilterByRegion.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
       summary_report = SummaryStats.report,
-      root_name = SummaryStats.root_name
+      root_name = SummaryStats.root_name,
+      disk_gb = ceil(size(ParallelFilterByRegion.filtered_vcf, "GB")) + 20
   }
 
   output {
@@ -265,14 +271,8 @@ task PreFilter {
     String input_vcf
     Int cpu_count
     File denials    # sample IDs to remove, one per line
+    Int disk_gb
   }
-
-  # input_vcf stays String so the command block below reads it via the fuse mount
-  # rather than Cromwell localizing it; this File-typed alias exists only so size()
-  # can query the GCS object's metadata for disk sizing, evaluated before the VM
-  # is provisioned — it never triggers an actual download.
-  File input_vcf_file = input_vcf
-  Int disk_gb = ceil(size(input_vcf_file, "GB")) + 20
 
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
 
@@ -318,12 +318,8 @@ task ParallelFilterByRegion {
     String variant_filter
     Int cpu_count
     File norm_fasta
+    Int disk_gb
   }
-
-  # same fuse-mount-preserving trick as PreFilter: input_vcf stays String, this
-  # alias only exists for size()'s metadata query.
-  File input_vcf_file = input_vcf
-  Int disk_gb = ceil(size(input_vcf_file, "GB")) + 20
 
   File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
@@ -594,13 +590,8 @@ task ConcatVcfs {
     Array[String] input_vcfs   # Array[File] coerced to Array[String] at call site — no localisation
     File summary_report
     String root_name
+    Int disk_gb
   }
-
-  # same trick as PreFilter/ParallelFilterByRegion: input_vcfs stays Array[String]
-  # (fuse mount), this alias only exists for size()'s metadata query, summed
-  # across the whole array.
-  Array[File] input_vcfs_files = input_vcfs
-  Int disk_gb = ceil(size(input_vcfs_files, "GB")) + 20
 
   command <<<
   set -euo
