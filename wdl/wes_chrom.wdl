@@ -265,8 +265,14 @@ task PreFilter {
     String input_vcf
     Int cpu_count
     File denials    # sample IDs to remove, one per line
-    Int disk_gb = 100
   }
+
+  # input_vcf stays String so the command block below reads it via the fuse mount
+  # rather than Cromwell localizing it; this File-typed alias exists only so size()
+  # can query the GCS object's metadata for disk sizing, evaluated before the VM
+  # is provisioned — it never triggers an actual download.
+  File input_vcf_file = input_vcf
+  Int disk_gb = ceil(size(input_vcf_file, "GB")) + 20
 
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
 
@@ -312,8 +318,12 @@ task ParallelFilterByRegion {
     String variant_filter
     Int cpu_count
     File norm_fasta
-    Int disk_gb = 100
   }
+
+  # same fuse-mount-preserving trick as PreFilter: input_vcf stays String, this
+  # alias only exists for size()'s metadata query.
+  File input_vcf_file = input_vcf
+  Int disk_gb = ceil(size(input_vcf_file, "GB")) + 20
 
   File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
@@ -584,8 +594,13 @@ task ConcatVcfs {
     Array[String] input_vcfs   # Array[File] coerced to Array[String] at call site — no localisation
     File summary_report
     String root_name
-    Int disk_gb = 100
   }
+
+  # same trick as PreFilter/ParallelFilterByRegion: input_vcfs stays Array[String]
+  # (fuse mount), this alias only exists for size()'s metadata query, summed
+  # across the whole array.
+  Array[File] input_vcfs_files = input_vcfs
+  Int disk_gb = ceil(size(input_vcfs_files, "GB")) + 20
 
   command <<<
   set -euo
