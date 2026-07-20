@@ -265,7 +265,7 @@ task PreFilter {
     String input_vcf
     Int cpu_count
     File denials    # sample IDs to remove, one per line
-    Int disk_gb = 50
+    Int disk_gb = 100
   }
 
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
