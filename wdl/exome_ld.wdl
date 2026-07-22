@@ -24,7 +24,7 @@ workflow exome_ld {
     File                 credible_groups   # text file with one group_report gs:// path per line
     Int                  chunk_mb         = 1000
     String        plink_conv_args  = "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h"
-    String        plink_merge_args = "--allow-extra-chr"
+    String        plink_merge_args = "--allow-extra-chr --keep-allele-order"
     String        out_prefix       = "finngen_R14_exome"
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
     File          annot                          # VEP annotation TSV.bgz
