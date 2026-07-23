@@ -1,5 +1,5 @@
 {
-    "exome_duplicates.n_regions": 100,
+    "exome_duplicates.n_regions": 120,
     "exome_duplicates.chunk_size": 10000,
     "exome_duplicates.max_het_F": 0.5,
     "exome_duplicates.plink_prefix": "FG",
