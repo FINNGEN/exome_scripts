@@ -394,6 +394,7 @@ task VcfToPlink {
 
   command <<<
   set -euo pipefail
+  echo "force rerun"
   export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
 
   resolve_fuse() {
