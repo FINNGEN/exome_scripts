@@ -79,7 +79,6 @@ workflow exome_ld {
     call VcfToPlink as FGtoPlink {
       input:
         vcf_template    = ConcatFgChrom.vcf,   # File coerced to String — no localisation
-        chrom           = chroms[ci],
         out_prefix      = "fg_chr" + chroms[ci],
         fg_pheno_file   = fg_pheno_file,
         plink_conv_args = plink_conv_args,
@@ -95,8 +94,10 @@ workflow exome_ld {
     Int chrom_i = i % length(chroms)
     call VcfToPlink as ExomeToPlink {
       input:
-        vcf_template    = exome_vcf_pairs[vcf_i][1],
-        chrom           = chroms[chrom_i],
+        vcf_template    = sub(exome_vcf_pairs[vcf_i][1], "CHROM",
+                              if chroms[chrom_i] == "23" then "X"
+                              else if chroms[chrom_i] == "24" then "Y"
+                              else chroms[chrom_i]),
         out_prefix      = exome_vcf_pairs[vcf_i][0] + "_chr" + chroms[chrom_i],
         exclude_bim     = FGtoPlink.bim[chrom_i],
         fg_pheno_file   = fg_pheno_file,
@@ -379,8 +380,7 @@ task ConcatFgChrom {
 # ---------------------------------------------------------------------------
 task VcfToPlink {
   input {
-    String        vcf_template     # gs://… with CHROM placeholder, or resolved gs:// path
-    String        chrom
+    String        vcf_template     # gs://… fully resolved (no CHROM placeholder)
     String        out_prefix
     File?         exclude_bim
     File          fg_pheno_file
@@ -399,8 +399,8 @@ task VcfToPlink {
 
   resolve_fuse() {
     local fuse
-    fuse=$(echo "$1" | sed "s/CHROM/~{chrom}/; s|gs://[^/]*/|/mnt/disks/gcs/|")
-    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1 (chrom ~{chrom})" >&2; exit 1; }
+    fuse=$(echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1" >&2; exit 1; }
     echo "$fuse"
   }
 
