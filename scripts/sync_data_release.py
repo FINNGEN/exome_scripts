@@ -11,6 +11,7 @@ deliverables, some renamed, some split by file type. Mapping (see data/README.tx
   data/QC/*.report.txt                   -> release/documentation/
   data/renamed_vcf_chr/*                 -> release/data/renamed_vcf_chr/
   data/plink_fg_merged_chr/*             -> release/data/plink_fg_merged_chr/
+  data/finngen_R14_exome_id_mapping_flowchart.png -> release/documentation/FG_EXOME_resolved_flowchart.png
 
 The public readme is not read from data/ at all — it's this repo's own
 data/finngen_R14_exome_readme.md, pushed to release/finngen_R14_exome_readme
@@ -34,6 +35,8 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 # (label, local path relative to repo root, dst_rel under release/)
 LOCAL_FILES = [
     ("readme", "data/finngen_R14_exome_readme.md", "finngen_R14_exome_readme"),
+    ("id_mapping_flowchart", "data/finngen_R14_exome_id_mapping_flowchart.png",
+     "documentation/FG_EXOME_resolved_flowchart.png"),
 ]
 
 CATEGORIES = [
