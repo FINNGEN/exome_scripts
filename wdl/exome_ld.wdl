@@ -24,11 +24,11 @@ workflow exome_ld {
     File                 credible_groups   # text file with one group_report gs:// path per line
     Int                  chunk_mb         = 1000
     String        plink_conv_args  = "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h"
-    String        plink_merge_args = "--allow-extra-chr"
+    String        plink_merge_args = "--allow-extra-chr --keep-allele-order"
     String        out_prefix       = "finngen_R14_exome"
     String        ld_params        = "--ld-window-kb 1000 --ld-window-r2 0.05"
     File          annot                          # VEP annotation TSV.bgz
-    String        filter_docker    = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld.zstd"
+    String        filter_docker    = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:ld.polars"
     Int           mem_gb           = 36
     Int           cpu              = 8
     Int           disk_gb          = 200
@@ -79,7 +79,6 @@ workflow exome_ld {
     call VcfToPlink as FGtoPlink {
       input:
         vcf_template    = ConcatFgChrom.vcf,   # File coerced to String — no localisation
-        chrom           = chroms[ci],
         out_prefix      = "fg_chr" + chroms[ci],
         fg_pheno_file   = fg_pheno_file,
         plink_conv_args = plink_conv_args,
@@ -95,8 +94,10 @@ workflow exome_ld {
     Int chrom_i = i % length(chroms)
     call VcfToPlink as ExomeToPlink {
       input:
-        vcf_template    = exome_vcf_pairs[vcf_i][1],
-        chrom           = chroms[chrom_i],
+        vcf_template    = sub(exome_vcf_pairs[vcf_i][1], "CHROM",
+                              if chroms[chrom_i] == "23" then "X"
+                              else if chroms[chrom_i] == "24" then "Y"
+                              else chroms[chrom_i]),
         out_prefix      = exome_vcf_pairs[vcf_i][0] + "_chr" + chroms[chrom_i],
         exclude_bim     = FGtoPlink.bim[chrom_i],
         fg_pheno_file   = fg_pheno_file,
@@ -153,6 +154,7 @@ workflow exome_ld {
       annot    = annot,
       afreq    = MergeChrom.afreq,
       chrom    = chroms[ci],
+      cpu      = cpu,
       docker   = filter_docker
     }
 
@@ -379,8 +381,7 @@ task ConcatFgChrom {
 # ---------------------------------------------------------------------------
 task VcfToPlink {
   input {
-    String        vcf_template     # gs://… with CHROM placeholder, or resolved gs:// path
-    String        chrom
+    String        vcf_template     # gs://… fully resolved (no CHROM placeholder)
     String        out_prefix
     File?         exclude_bim
     File          fg_pheno_file
@@ -394,12 +395,13 @@ task VcfToPlink {
 
   command <<<
   set -euo pipefail
+  echo "force rerun"
   export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
 
   resolve_fuse() {
     local fuse
-    fuse=$(echo "$1" | sed "s/CHROM/~{chrom}/; s|gs://[^/]*/|/mnt/disks/gcs/|")
-    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1 (chrom ~{chrom})" >&2; exit 1; }
+    fuse=$(echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1" >&2; exit 1; }
     echo "$fuse"
   }
 
@@ -572,8 +574,10 @@ task FilterLd {
     File   afreq
     String chrom
     String docker
-    Int    mem_gb  = 16
-    Int    disk_gb = 20
+    Int    cpu        = 8
+    Int    mem_gb      = 16
+    Int    disk_gb     = 20
+    Int    chunk_rows   = 8000000   # rows/batch — bounds peak memory instead of scaling with vcor size
   }
 
   String out = "exome_finngen_ld_" + chrom + ".ld.tsv.gz"
@@ -581,37 +585,79 @@ task FilterLd {
   command <<<
   set -euo pipefail
 
-  zstd -d ~{vcor_zst} -c | bgzip > tmp.vcor.gz
-  echo "~{chrom}: $(zcat tmp.vcor.gz | tail -n+2 | wc -l) raw pairs" >&2
-
   python3 << 'PYEOF'
-  import sys, pandas as pd
+  import io, sys, time, subprocess
+  import polars as pl
+
+  t0 = time.time()
+  def stage(i, n, name):
+      print(f"~{chrom}: ({i}/{n}) {name} [{time.time()-t0:6.1f}s]", file=sys.stderr)
 
   CODING = {"missense_variant","stop_gained","frameshift_variant","splice_acceptor_variant",
             "splice_donor_variant","start_lost","stop_lost","inframe_insertion","inframe_deletion"}
+  threads = ~{cpu}
+  chunk_rows = ~{chunk_rows}
 
-  fg_ids       = {line.split()[1] for line in open("~{fg_bim}")}
-  annot        = pd.read_csv("~{annot}", sep='\t', usecols=['rsid','most_severe','gene_most_severe'], compression='gzip')
-  annot['rsid'] = annot['rsid'].str.replace('chrX_', 'chr23_', regex=False)
-  conseq_map   = annot[annot['most_severe'].isin(CODING)].drop_duplicates('rsid').set_index('rsid')['most_severe'].to_dict()
-  gene_map     = annot.drop_duplicates('rsid').set_index('rsid')['gene_most_severe'].to_dict()
-  afreq        = pd.read_csv("~{afreq}", sep='\t')
-  afreq.columns = afreq.columns.str.lstrip('#')
-  af_map       = afreq.set_index('ID')['ALT_FREQS'].to_dict()
-  print(f"~{chrom}: {len(fg_ids)} FG IDs, {len(conseq_map)} coding, {len(af_map)} AF entries", file=sys.stderr)
+  stage(1, 3, "loading annot/afreq/fg_bim tables")
+  fg_ids = {line.split()[1] for line in open("~{fg_bim}")}
 
-  import gzip
-  with gzip.open("~{out}", 'wt') as out:
-    for i, chunk in enumerate(pd.read_csv("tmp.vcor.gz", sep='\t', chunksize=500_000, usecols=['ID_A','ID_B','UNPHASED_R2'])):
-      df = chunk[~chunk['ID_B'].isin(fg_ids)].rename(columns={'ID_A':'FG_SNP','ID_B':'EXOME_SNP','UNPHASED_R2':'R2'})
-      df['exome_consequence']  = df['EXOME_SNP'].map(conseq_map).fillna('NA')
-      df['EXOME_AF']           = df['EXOME_SNP'].map(af_map)
-      df['exome_nearest_gene'] = df['EXOME_SNP'].map(gene_map)
-      df.to_csv(out, sep='\t', index=False, header=(i==0))
-  print(f"~{chrom}: done", file=sys.stderr)
+  annot = pl.read_csv("~{annot}", separator='\t', columns=['rsid','most_severe','gene_most_severe'])
+  annot = annot.with_columns(pl.col('rsid').str.replace('chrX_', 'chr23_', literal=True))
+  annot = annot.unique(subset='rsid', keep='first')
+  conseq = (annot.filter(pl.col('most_severe').is_in(list(CODING)))
+            .select(pl.col('rsid').alias('EXOME_SNP'), pl.col('most_severe').alias('exome_consequence')))
+  genes  = annot.select(pl.col('rsid').alias('EXOME_SNP'), pl.col('gene_most_severe').alias('exome_nearest_gene'))
+
+  afreq = pl.read_csv("~{afreq}", separator='\t')
+  afreq.columns = [c.lstrip('#') for c in afreq.columns]
+  afreq = afreq.select(pl.col('ID').alias('EXOME_SNP'), pl.col('ALT_FREQS').alias('EXOME_AF'))
+
+  print(f"~{chrom}: {len(fg_ids)} FG IDs, {conseq.height} coding, {afreq.height} AF entries", file=sys.stderr)
+
+  def process_chunk(header, lines):
+      raw = pl.read_csv(io.BytesIO(header + b"".join(lines)), separator='\t',
+                         columns=['ID_A', 'ID_B', 'UNPHASED_R2'])
+      return (raw.filter(~pl.col('ID_B').is_in(fg_ids))
+              .rename({'ID_A': 'FG_SNP', 'ID_B': 'EXOME_SNP', 'UNPHASED_R2': 'R2'})
+              .join(conseq, on='EXOME_SNP', how='left', maintain_order='left')
+              .with_columns(pl.col('exome_consequence').fill_null('NA'))
+              .join(afreq, on='EXOME_SNP', how='left', maintain_order='left')
+              .join(genes, on='EXOME_SNP', how='left', maintain_order='left'))
+
+  # single decompression pass streamed straight into polars, in chunk_rows-sized
+  # batches, so peak memory tracks chunk_rows instead of the full (potentially
+  # 10s-of-GB decompressed) vcor size
+  stage(2, 3, f"streaming vcor.zst in {chunk_rows:,}-row chunks")
+  zstd_p = subprocess.Popen(["zstd", "-d", f"-T{threads}", "~{vcor_zst}", "-c"], stdout=subprocess.PIPE)
+
+  rows_done = 0
+  with open("~{out}", "wb") as fh:
+      pigz_p = subprocess.Popen(["pigz", "-p", str(threads)], stdin=subprocess.PIPE, stdout=fh)
+      header = zstd_p.stdout.readline()
+      header_written = False
+      buf = []
+      for line in zstd_p.stdout:
+          buf.append(line)
+          if len(buf) >= chunk_rows:
+              df = process_chunk(header, buf)
+              df.write_csv(pigz_p.stdin, separator='\t', include_header=not header_written)
+              header_written = True
+              rows_done += len(buf)
+              buf = []
+              print(f"~{chrom}: {rows_done:,} pairs processed [{time.time()-t0:6.1f}s]", file=sys.stderr)
+      if buf:
+          df = process_chunk(header, buf)
+          df.write_csv(pigz_p.stdin, separator='\t', include_header=not header_written)
+          rows_done += len(buf)
+      pigz_p.stdin.close()
+      pigz_p.wait()
+
+  zstd_p.stdout.close()
+  if zstd_p.wait() != 0:
+      raise RuntimeError("zstd decompression failed")
+
+  stage(3, 3, f"done — {rows_done:,} raw pairs")
   PYEOF
-
-  rm tmp.vcor.gz
   >>>
 
   output {
@@ -620,6 +666,7 @@ task FilterLd {
 
   runtime {
     docker: docker
+    cpu:    cpu
     memory: mem_gb + " GB"
     disks:  "local-disk ~{disk_gb} HDD"
   }

@@ -2,7 +2,7 @@
 
 ## finngen_R14 exome data
 
-Exome sequencing data processed from 45,399 samples across four sequencing batches, of which 43,302 were successfully mapped to existing FinnGen IDs. These data are personal data and must be treated according to the Finnish Personal Data Act 523/1999, EU Data Protection Directive 95/46/EC and EU General Data Protection Regulation (GDPR).
+Exome sequencing data processed from 45,375 samples across four sequencing batches, of which 43,289 were successfully mapped to existing FinnGen IDs. These data are personal data and must be treated according to the Finnish Personal Data Act 523/1999, EU Data Protection Directive 95/46/EC and EU General Data Protection Regulation (GDPR).
 
 > For detailed pipeline documentation and source code, see the [GitHub repository](https://github.com/FINNGEN/exome_scripts)
 
@@ -10,11 +10,11 @@ The pipeline processes exome datasets from multiple sequencing batches through t
 
 | Dataset | Samples |
 |---|---:|
-| finngen_wes_gnomad_v4 | 25,201 |
-| fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly | 12,405 |
-| THLBB2023_14_WES_Botnia | 7,164 |
-| likely_pathogenic_annot_annotated_full_header_fix_resampled | 629 |
-| **Total** | **45,399** |
+| finngen_wes_gnomad_v4 | 25,197 |
+| fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly | 12,389 |
+| THLBB2023_14_WES_Botnia | 7,161 |
+| likely_pathogenic_annot_annotated_full_header_fix_resampled | 628 |
+| **Total** | **45,375** |
 
 ---
 
@@ -50,21 +50,21 @@ The resulting mapping is stored in `finngen_R14_exome_id_mapping.tsv` (see File 
 
 | Group | Status | N | Description |
 |---|---|---:|---|
-| MATCHED | `ID_CONFIRMED` | 40,189 | Single candidate; confirmed by matching IDs |
-| MATCHED | `RESOLVED_BY_ALIAS` | 1,524 | Multiple candidates resolved via known alias group |
+| MATCHED | `ID_CONFIRMED` | 40,177 | Single candidate; confirmed by matching IDs |
+| MATCHED | `RESOLVED_BY_ALIAS` | 1,523 | Multiple candidates resolved via known alias group |
 | MATCHED | `CONFLICT_KEPT` (was `ID_CONFIRMED`) | 1,347 | Contested FinnGen ID; won priority tiebreak |
 | MATCHED | `RESOLVED_BY_ID` | 160 | Twins in ref; query ID matched one candidate |
 | MATCHED | `UNIQUE` | 52 | Single candidate; matched by genetics only |
 | MATCHED | `CONFLICT_KEPT` (was `RESOLVED_BY_ALIAS`) | 30 | Contested FinnGen ID; won priority tiebreak |
-| **Total matched** | | **43,302** | |
+| **Total matched** | | **43,289** | |
 | DROPPED | `CONFLICT_DROPPED` (was `ID_CONFIRMED`) | 1,146 | Contested FinnGen ID; lost tiebreak |
 | DROPPED | `CONFLICT_DROPPED` (was `RESOLVED_BY_ALIAS`) | 286 | Contested FinnGen ID; lost tiebreak |
 | DROPPED | `CONFLICT_DROPPED` (was `UNIQUE`) | 18 | Contested FinnGen ID; lost tiebreak |
 | DROPPED | `CONFLICT_DROPPED` (was `RESOLVED_BY_ID`) | 6 | Contested FinnGen ID; lost tiebreak |
 | **Total dropped** | | **1,456** | |
-| NO MATCH | `MISSING` | 636 | No genetic match found |
+| NO MATCH | `MISSING` | 625 | No genetic match found |
 | EXCLUDED | `HET_EXCLUDED` | 5 | Excluded by heterozygosity filter (F > 0.3) prior to KING — WES dataset only |
-| **Total** | | **45,399** | |
+| **Total** | | **45,375** | |
 
 ### FG/Exome LD
 
@@ -107,7 +107,7 @@ For each FinnGen credible set lead variant, exome variants in LD (r² ≥ 0.05, 
 
 ### Merged plink data
 
-FinnGen imputed array variants and exome variants are jointly converted to plink1 binary format and merged per chromosome. For each chromosome, the FG plink fileset (subsetted to the 43,302 matched exome samples) and all four exome plink filesets are merged via `plink --merge-list` into a single combined BED/BIM/FAM. Exome-private variants are included alongside FinnGen array variants; variants already present in the FG BIM are excluded from the exome filesets to avoid duplication. The resulting filesets span chromosomes 1–23 and contain ~31.1 million variants across 43,302 samples.
+FinnGen imputed array variants and exome variants are jointly converted to plink1 binary format and merged per chromosome. For each chromosome, the FG plink fileset (subsetted to the 43,289 matched exome samples) and all four exome plink filesets are merged via `plink --merge-list` into a single combined BED/BIM/FAM. Exome-private variants are included alongside FinnGen array variants; variants already present in the FG BIM are excluded from the exome filesets to avoid duplication. The resulting filesets span chromosomes 1–23 and contain ~31.1 million variants across 43,289 samples.
 
 ---
 
@@ -124,7 +124,7 @@ FinnGen imputed array variants and exome variants are jointly converted to plink
 | `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz.tbi` | Index for renamed VCF |
 | `finngen_R14_exome.ld.tsv.gz` | All FG→exome LD pairs (r² ≥ 0.05, 1 Mb window), genome-wide; annotated with VEP consequence and allele frequency |
 | `finngen_R14_exome.ld_annotated.tsv.gz` | Exome variants in LD with FinnGen credible set leads, annotated with phenotype and credible set metadata (~900k rows) |
-| `plink_fg_merged_chr/finngen_R14_exome_chr[N].bed` | Per-chromosome merged plink BED (FG array + exome variants, 43,302 samples, chr1–23) |
+| `plink_fg_merged_chr/finngen_R14_exome_chr[N].bed` | Per-chromosome merged plink BED (FG array + exome variants, 43,289 samples, chr1–23) |
 | `plink_fg_merged_chr/finngen_R14_exome_chr[N].bim` | BIM file; variant IDs in `CHROM_POS_REF_ALT` format; ~31.1 M variants genome-wide |
 | `plink_fg_merged_chr/finngen_R14_exome_chr[N].fam` | FAM file with FinnGen sample IDs |
 

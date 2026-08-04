@@ -8,6 +8,20 @@ workflow single_file_qc {
     Int cpu_count
     Int? test_sample_count
     File norm_fasta
+    File denials                  # sample IDs to remove, one per line (see FilterByChromosome)
+    File aliases                  # tab-delimited alias groups (one group per line, same members
+                                   # share a group) — used to expand `denials` to every alias of
+                                   # each denied ID before exclusion, since the ID actually present
+                                   # in a given VCF's header may be an alias rather than the ID
+                                   # recorded in the denials list (see ExpandDenials)
+  }
+
+  # Expand denials to cover alias variants before any per-chromosome FilterByChromosome call uses it.
+  # Dataset-independent, so this runs once for the whole workflow rather than once per VCF.
+  call ExpandDenials {
+    input:
+      denials = denials,
+      aliases = aliases
   }
 
   scatter (vcf in vcf_files) {
@@ -32,7 +46,8 @@ workflow single_file_qc {
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
         cpu_count = cpu_count,
-        norm_fasta = norm_fasta
+        norm_fasta = norm_fasta,
+        denials = ExpandDenials.expanded_denials
     }
 
     call ComputeStats as FilteredStats {
@@ -58,6 +73,53 @@ workflow single_file_qc {
   }
 }
 
+# ── ExpandDenials ─────────────────────────────────────────────────────────────
+# Expands a raw denials list (one ID per line) to include every alias of each
+# denied ID, per the alias groups in `aliases` (same tab-delimited group-per-
+# line format as resolve_mapping.py's DEFAULT_ALIASES / load_aliases). Needed
+# because the ID recorded in the denials list and the ID actually present in a
+# given VCF's header can be different aliases of the same participant —
+# bcftools view -S ^denials only matches literal strings, so
+# FilterByChromosome would otherwise fail to exclude (or hard-error on) a
+# denied sample whose header ID is an alias rather than the one on the list.
+
+task ExpandDenials {
+  input {
+    File denials    # plain list, one ID per line
+    File aliases    # tab-delimited alias groups, one group per line
+  }
+
+  command <<<
+  set -euo pipefail
+  python3 << 'PY'
+denied = {line.strip() for line in open("~{denials}") if line.strip()}
+expanded = set(denied)
+with open("~{aliases}") as fh:
+    for line in fh:
+        ids = [x.strip() for x in line.strip().split("\t") if x.strip()]
+        if len(ids) < 2:
+            continue
+        if denied & set(ids):
+            expanded.update(ids)
+with open("expanded_denials.txt", "w") as out:
+    for id_ in sorted(expanded):
+        out.write(id_ + "\n")
+print(f"Expanded {len(denied)} denied IDs to {len(expanded)} IDs (incl. aliases)")
+PY
+  >>>
+
+  output {
+    File expanded_denials = "expanded_denials.txt"
+  }
+
+  runtime {
+    memory: "2G"
+    disks: "local-disk 10 HDD"
+    cpu: 1
+    preemptible: 1
+  }
+}
+
 task FilterByChromosome {
   input {
     File input_vcf
@@ -65,6 +127,7 @@ task FilterByChromosome {
     String variant_filter
     Int cpu_count
     File norm_fasta
+    File denials    # sample IDs to remove, one per line
   }
 
   File input_vcf_index = input_vcf + ".tbi"
@@ -84,6 +147,7 @@ task FilterByChromosome {
   GENOTYPE_FILTER='~{genotype_filter}'
   VARIANT_FILTER='~{variant_filter}'
   OUTPUT_VCF="~{output_vcf}"
+  DENIALS="~{denials}"
   chromosomes=()
   CHUNKS=$(( $(nproc) - 1 ))
   if [[ $CHUNKS -lt 1 ]]; then CHUNKS=1; fi
@@ -94,6 +158,7 @@ task FilterByChromosome {
   echo "Genotype filter: $GENOTYPE_FILTER"
   echo "Variant filter:  $VARIANT_FILTER"
   echo "CPU cores:       $CHUNKS"
+  echo "Removing denied samples listed in: $DENIALS"
   echo ""
 
   if [[ ${#chromosomes[@]} -eq 0 ]]; then
@@ -133,7 +198,7 @@ task FilterByChromosome {
 #!/bin/bash
 echo "Processing chromosome: ${chrom}"
 printf '${chrom}\t0\t9999999999\n' > "${output}.region.bed"
-bcftools view -R "${output}.region.bed" "${INPUT_VCF}" | \\
+bcftools view -S ^${DENIALS} --force-samples -R "${output}.region.bed" "${INPUT_VCF}" | \\
     tr -d '\0' | \\
     ${RENAME_STEP} | \\
     bcftools norm -f '${NORM_FASTA}' -m -any -c x -Ou | \\
@@ -336,6 +401,18 @@ task ValidateFiltering {
   done
 
   echo "" >> ~{report_name}
+
+  # Test 5: Sample count (denial exclusion check)
+  echo "Test 5: Sample count (denial exclusion check)" >> ~{report_name}
+  echo "-----------------------------------------------" >> ~{report_name}
+
+  orig_samples=$(bcftools query -l "~{original_sample_vcf}" | wc -l)
+  filt_samples=$(bcftools query -l "~{filtered_sample_vcf}" | wc -l)
+  samples_removed=$((orig_samples - filt_samples))
+
+  echo "Original samples: $orig_samples" >> ~{report_name}
+  echo "Filtered samples: $filt_samples" >> ~{report_name}
+  echo "Samples removed:  $samples_removed" >> ~{report_name}
 
   echo "" >> ~{report_name}
   echo "=== Validation Complete ===" >> ~{report_name}

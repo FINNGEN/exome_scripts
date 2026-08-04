@@ -6,29 +6,30 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ## Summary results
 
-<!-- BEGIN:data/FG_EXOME_resolved_stats.md -->
+<!-- BEGIN:data/finngen_R14_exome_id_mapping_stats.md -->
 ## Mapping Totals
 
 | GROUP | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| MATCHED | 43302 | 619 | 7031 | 12233 | 23419 | 95.4% | samples with a final QRY→REF mapping in the output |
+| MATCHED | 43289 | 618 | 7029 | 12223 | 23419 | 95.4% | samples with a final QRY→REF mapping in the output |
 | DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | found by KING but excluded from final mapping |
-| NO MATCH | 636 | 0 | 111 | 53 | 472 | 1.4% | absent from ref or below KING concordance threshold |
-| EXCLUDED | 5 | 0 | 0 | 0 | 5 | 0.0% | removed before KING by heterozygosity filter (F > max_het_F) |
-| TOTAL | 45399 | 629 | 7164 | 12405 | 25201 | 100.0% |  |
+| NO MATCH | 625 | 0 | 110 | 47 | 468 | 1.4% | absent from ref or below KING concordance threshold |
+| EXCLUDED | 5 | 0 | 0 | 0 | 5 | 0.0% | removed before KING due to sample-level QC failure |
+| TOTAL | 45375 | 628 | 7161 | 12389 | 25197 | 100.0% |  |
 
 ## Mapping Breakdown
 
 | GROUP | STATUS | TOTAL | ADPKD | BOTNIA | DALY | WES | PCT | NOTES |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| MATCHED | ID_CONFIRMED | 40189 | 601 | 5937 | 11816 | 21835 | 88.5% | single candidate; KING match confirmed by matching IDs |
+| MATCHED | ID_CONFIRMED | 40177 | 600 | 5936 | 11806 | 21835 | 88.5% | single candidate; KING match confirmed by matching IDs |
 | MATCHED | RESOLVED_BY_ID | 160 | 6 | 31 | 102 | 21 | 0.4% | twins in ref; query ID matched one candidate |
-| MATCHED | RESOLVED_BY_ALIAS | 1524 | 0 | 1054 | 0 | 470 | 3.4% | twins in ref; candidates are known aliases of each other |
+| MATCHED | RESOLVED_BY_ALIAS | 1523 | 0 | 1053 | 0 | 470 | 3.4% | twins in ref; candidates are known aliases of each other |
 | MATCHED | UNIQUE | 52 | 0 | 2 | 11 | 39 | 0.1% | single candidate; matched by genetics only |
 | MATCHED | CONFLICT_KEPT | 1377 | 12 | 7 | 304 | 1054 | 3.0% | contested ref ID; kept after priority tiebreak; 1377 ref IDs contested, avg 31.4 queries/ref |
 | DROPPED | CONFLICT_DROPPED | 1456 | 10 | 22 | 119 | 1305 | 3.2% | contested ref ID; lost tiebreak; REF_MAPPED = NA |
-| NO MATCH | MISSING | 636 | 0 | 111 | 53 | 472 | 1.4% | no KING match found |
-<!-- END:data/FG_EXOME_resolved_stats.md -->
+| NO MATCH | MISSING | 625 | 0 | 110 | 47 | 468 | 1.4% | no KING match found |
+| EXCLUDED | HET_EXCLUDED | 5 | 0 | 0 | 0 | 5 | 0.0% | excluded by heterozygosity filter (F > 0.3) prior to KING |
+<!-- END:data/finngen_R14_exome_id_mapping_stats.md -->
 
 ### Mapping flowchart
 
@@ -504,6 +505,19 @@ This section summarizes the datasets and processing steps required to merge them
 | No match | 330 |
 
 
+### Sample exclusion (denials + aliases)
+
+All three QC workflows below (`wes_chrom.wdl`, `single_file_qc.wdl`, `daly_qc.wdl`) take two required inputs, `denials` and `aliases`, used to remove samples that must not appear in the QC'd output (e.g. a registry-mandated denial list).
+
+- `denials`: plain text file, one sample ID per line, to exclude.
+- `aliases`: tab-delimited file of alias groups, one group per line (same format used elsewhere in this repo — e.g. `resolve_mapping.py`'s duplicate/twin resolution) — groups of IDs that refer to the same participant.
+
+**Why aliases matter**: the ID recorded on the denial list and the ID actually present in a given VCF's sample header can be different aliases of the same participant. Excluding by literal string match against the denial list alone would silently miss a denied sample whose header ID isn't the one on the list.
+
+Each workflow runs a shared `ExpandDenials` task once per workflow (not once per chromosome/region) that expands the raw denial list to include every alias of each denied ID, before the per-chromosome/per-region filtering step applies `bcftools view -S ^<expanded_denials> --force-samples`. `--force-samples` lets the denial list contain IDs absent from a given VCF's samples (e.g. belonging to a different cohort) without hard-failing the task.
+
+---
+
 ### WDL Workflows
 
 This repository contains WDL (Workflow Description Language) workflows for processing VCF files from sequencing data. All workflows are located in the `wdl/` directory.
@@ -527,7 +541,8 @@ This repository contains WDL (Workflow Description Language) workflows for proce
 1. Optionally subsets samples for testing (if `test_sample_count` is provided)
 2. Computes statistics on original VCFs (variant counts per chromosome)
 3. Pre-filters each VCF (`PreFilter` task):
-   - Removes AC=0 variants (monomorphic sites)
+   - Excludes denied samples (`denials` + `aliases` expansion, see [Sample exclusion](#sample-exclusion-denials--aliases) above)
+   - Recalculates AC after exclusion, then removes AC=0 variants (monomorphic sites)
    - Annotates variant IDs as `CHROM_POS_REF_ALT`
 4. Parallel filters by region using position-based chunking:
    - Splits each chromosome into equal chunks by variant positions
@@ -536,7 +551,7 @@ This repository contains WDL (Workflow Description Language) workflows for proce
    - Recalculates AC (allele count) after genotype filtering
    - Applies variant filters (removes variants with AC=0, etc.)
 5. Validates filtering on sample VCFs (checks filters worked correctly)
-6. Creates summary statistics showing variant counts and drop rates per chromosome
+6. Creates summary statistics showing variant/sample counts and drop rates per chromosome, including samples removed by the denial list
 
 **Key features:**
 
@@ -553,6 +568,8 @@ This repository contains WDL (Workflow Description Language) workflows for proce
   "variant_filter": "AC>0 & ALT!=\"*\"",
   "cpu_count": 16,
   "norm_fasta": "gs://bucket/reference.fa",
+  "denials": "path/to/denials.txt",
+  "aliases": "path/to/aliases.txt",
   "test_sample_count": 10  // Optional: subset to first N samples for testing
 }
 ```
@@ -569,11 +586,11 @@ gs://bucket/chr3.vcf.gz
 
 - `filtered_vcfs[]`: Per-chromosome filtered VCF files
 - `filtered_vcf_tbis[]`: Corresponding index files
-- `merged_vcf`: All chromosomes merged into single VCF
-- `merged_vcf_tbi`: Index for merged VCF
-- `summary_table`: TSV with chromosome-level and total drop rates
-- `original_stats[]`: Variant counts before filtering
-- `filtered_stats[]`: Variant counts after filtering
+- `concatenated_vcf`: All chromosomes merged into single VCF
+- `concatenated_vcf_tbi`: Index for merged VCF
+- `report`: TSV with chromosome-level and total variant drop rates, plus original/filtered sample counts and samples removed by the denial list
+- `original_stats[]`: Variant/sample counts before filtering
+- `filtered_stats[]`: Variant/sample counts after filtering
 - `validation_reports[]`: Per-chromosome validation reports
 
 
@@ -590,6 +607,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 1. Optionally subsets samples for testing
 2. Computes chromosome counts for original VCF
 3. Filters each chromosome in parallel:
+   - Excludes denied samples (`denials` + `aliases` expansion, see [Sample exclusion](#sample-exclusion-denials--aliases) above)
    - **Auto-detects chromosome naming** — if the VCF uses non-prefixed names (`1`, `22`) instead of `chr1`, `chr22`, chromosomes are permanently renamed to `chr`-prefix in the output so both VCF types produce consistently named output
    - Strips null bytes (`tr -d '\0'`) to handle corrupt FORMAT fields
    - **Splits multiallelics** (`bcftools norm -m -any`) and **normalises against reference FASTA** (`bcftools norm -c x`)
@@ -597,7 +615,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
    - Recalculates AC
    - Filters variants by expression
    - Annotates variant IDs as `CHROM_POS_REF_ALT`
-4. Validates filtering worked correctly
+4. Validates filtering worked correctly, including a sample-count check (original vs. filtered sample counts, per VCF) confirming the denial exclusion actually removed samples
 5. Outputs filtered VCF files
 
 **Key differences from wes_chrom.wdl:**
@@ -617,6 +635,8 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
   "variant_filter": "AC>0 & ALT!=\"*\"",
   "cpu_count": 8,
   "norm_fasta": "gs://bucket/reference.fa",
+  "denials": "path/to/denials.txt",
+  "aliases": "path/to/aliases.txt",
   "test_sample_count": 10  // Optional
 }
 ```
@@ -627,7 +647,7 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 - `filtered_vcf_tbis[]`: Index files
 - `original_chrom_counts[]`: Variant counts per chromosome (before)
 - `filtered_chrom_counts[]`: Variant counts per chromosome (after)
-- `validation_reports[]`: Validation reports
+- `validation_reports[]`: Validation reports, including original/filtered sample counts and samples removed by the denial list
 
 **How to run:**
 
@@ -637,7 +657,9 @@ cat > inputs.json << EOF
   "single_file_qc.vcf_files": ["gs://bucket/whole_genome.vcf.gz"],
   "single_file_qc.genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
   "single_file_qc.variant_filter": "AC>0 & ALT!=\\\"*\\\"",
-  "single_file_qc.cpu_count": 8
+  "single_file_qc.cpu_count": 8,
+  "single_file_qc.denials": "path/to/denials.txt",
+  "single_file_qc.aliases": "path/to/aliases.txt"
 }
 EOF
 
@@ -656,14 +678,15 @@ For each input VCF (scatter over vcf_list):
 
 1. **ComputeStats**: Reads the remote index only — gets chrom, variant count, sample count without downloading the VCF.
 2. **AnnotateAndRename**: Fetches the VCF header, injects any missing FILTER definitions (`NO_HQ_GENOTYPES`, `ExcessHet`, `LowQual`, `EXCESS_ALLELES`, `OUTSIDE_OF_TARGETS`), builds a `SAMPLE_ID → FINNGENID_finngen` rename map from the `rename_file`, resolves duplicate new IDs with `_dup`/`_dup2` suffixes, and applies header + rename in a single `bcftools reheader` pass (fast — body is copied verbatim).
-3. **ParallelFilter**: Splits the chromosome into `cpu_count × chunk_multiplier` equal position windows, filters each chunk in parallel with GNU parallel (`bcftools view -e filter_expression`), annotates variant IDs as `CHROM_POS_REF_ALT`, and concatenates.
-4. **ComputeStats** (again): Variant counts on the filtered VCF.
-5. **ValidateFiltering**: Checks no variants matching the filter expression remain, verifies `CHROM_POS_REF_ALT` ID format, and reports rename counts.
+3. **ExpandDenials** *(once, before the scatter)*: Expands `denials` to include every alias of each denied ID (see [Sample exclusion](#sample-exclusion-denials--aliases) above).
+4. **ParallelFilter**: Excludes denied samples (`bcftools view -S ^<expanded_denials> --force-samples`), splits the chromosome into `cpu_count × chunk_multiplier` equal position windows, filters each chunk in parallel with GNU parallel (`bcftools view -e filter_expression`), annotates variant IDs as `CHROM_POS_REF_ALT`, and concatenates.
+5. **ComputeStats** (again): Variant/sample counts on the filtered VCF.
+6. **ValidateFiltering**: Checks no variants matching the filter expression remain, verifies `CHROM_POS_REF_ALT` ID format, and reports rename counts.
 
 Then globally:
 
-6. **SummaryStats**: Per-chromosome variant counts + drop rates, derives output root name from input filenames.
-7. **SortAndMerge**: Concatenates per-chromosome filtered VCFs (in vcf_list order) into `{root_name}.QC_ANNOTATED.vcf.gz`.
+7. **SummaryStats**: Per-chromosome variant counts + drop rates, plus original/filtered sample counts and samples removed by the denial list; derives output root name from input filenames.
+8. **SortAndMerge**: Concatenates per-chromosome filtered VCFs (in vcf_list order) into `{root_name}.QC_ANNOTATED.vcf.gz`.
 
 **Inputs:**
 
@@ -674,20 +697,22 @@ Then globally:
   "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
   "daly_qc.cpu_count":        8,
   "daly_qc.vcf_max_gb":       25,
-  "daly_qc.chunk_multiplier": 3
+  "daly_qc.chunk_multiplier": 3,
+  "daly_qc.denials":          "path/to/denials.txt",
+  "daly_qc.aliases":          "path/to/aliases.txt"
 }
 ```
 
-`rename_file` is a TSV with columns: `FINNGENID_finngen(1)`, `FINNGENID_biobank(2)`, `SAMPLE_ID(3)` — samples are renamed from col 3 to col 1. `filter_expression`, `vcf_max_gb`, and `chunk_multiplier` are optional.
+`rename_file` is a TSV with columns: `FINNGENID_finngen(1)`, `FINNGENID_biobank(2)`, `SAMPLE_ID(3)` — samples are renamed from col 3 to col 1. `filter_expression`, `vcf_max_gb`, and `chunk_multiplier` are optional; `denials` and `aliases` are required (see [Sample exclusion](#sample-exclusion-denials--aliases) above).
 
 **Outputs:**
 
 - `original_stats[]`: Variant/sample counts before filtering (index-only, fast)
-- `filtered_stats[]`: Variant counts after filtering
+- `filtered_stats[]`: Variant/sample counts after filtering
 - `validation_reports[]`: Per-VCF filter check + rename summary
 - `merged_vcf`: `{root_name}.QC_ANNOTATED.vcf.gz` — all chromosomes merged, samples renamed to FinnGen IDs
 - `merged_vcf_tbi`: Index for merged VCF
-- `report`: `{root_name}.QC_ANNOTATED.report.txt` — per-chromosome and total drop rates
+- `report`: `{root_name}.QC_ANNOTATED.report.txt` — per-chromosome and total drop rates, plus original/filtered sample counts and samples removed by the denial list
 
 **How to run:**
 
@@ -697,7 +722,9 @@ cat > inputs.json << EOF
   "daly_qc.vcf_list":         "vcf_files.txt",
   "daly_qc.rename_file":      "rename.tsv",
   "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
-  "daly_qc.cpu_count":        8
+  "daly_qc.cpu_count":        8,
+  "daly_qc.denials":          "denials.txt",
+  "daly_qc.aliases":          "aliases.txt"
 }
 EOF
 

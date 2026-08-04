@@ -8,10 +8,24 @@ workflow wes_chrom {
     Int cpu_count
     Int? test_sample_count
     File norm_fasta
+    File denials                  # sample IDs to remove, one per line (see PreFilter)
+    File aliases                  # tab-delimited alias groups (one group per line, same members
+                                   # share a group) — used to expand `denials` to every alias of
+                                   # each denied ID before exclusion, since the ID actually present
+                                   # in a given VCF's header may be an alias rather than the ID
+                                   # recorded in the denials list (see ExpandDenials)
    }
 
-  Array[File] vcf_files = read_lines(vcf_list)
-  
+  Array[String] vcf_files = read_lines(vcf_list)
+
+  # Expand denials to cover alias variants before any per-chromosome PreFilter call uses it.
+  # Dataset-independent, so this runs once for the whole workflow rather than once per chromosome.
+  call ExpandDenials {
+    input:
+      denials = denials,
+      aliases = aliases
+  }
+
   scatter (vcf in vcf_files) {
     if (defined(test_sample_count)) {
       call SubsetSamples {
@@ -21,7 +35,9 @@ workflow wes_chrom {
       }
     }
 
-    File vcf_to_filter = select_first([SubsetSamples.subset_vcf, vcf])
+    String vcf_to_filter = if defined(SubsetSamples.subset_vcf)
+                            then select_first([SubsetSamples.subset_vcf]) + ""
+                            else vcf
 
     call ComputeStats as OriginalStats {
       input:
@@ -29,25 +45,31 @@ workflow wes_chrom {
         cpu_count = cpu_count
     }
 
+    # size() here is a workflow-level expression: Cromwell resolves it with a metadata
+    # lookup against the GCS object, not a call input, so it never triggers localization
+    # the way a File-typed task input/declaration would.
     call PreFilter {
       input:
         input_vcf = vcf_to_filter,
-        cpu_count = cpu_count
+        cpu_count = cpu_count,
+        denials = ExpandDenials.expanded_denials,
+        disk_gb = ceil(size(vcf_to_filter, "GB")) + 20
     }
 
     call ParallelFilterByRegion {
       input:
-        input_vcf = PreFilter.prefiltered_vcf,
+        input_vcf = PreFilter.prefiltered_vcf + "",
         positions = OriginalStats.positions,
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
         cpu_count = cpu_count,
-        norm_fasta = norm_fasta
+        norm_fasta = norm_fasta,
+        disk_gb = ceil(size(PreFilter.prefiltered_vcf, "GB")) + 20
     }
-    
+
     call ComputeStats as FilteredStats {
       input:
-        input_vcf = ParallelFilterByRegion.filtered_vcf,
+        input_vcf = ParallelFilterByRegion.filtered_vcf + "",
         cpu_count = cpu_count
     }
     
@@ -74,10 +96,10 @@ workflow wes_chrom {
 
   call ConcatVcfs {
     input:
-      input_vcfs = ParallelFilterByRegion.filtered_vcf,
-      input_vcf_tbis = ParallelFilterByRegion.filtered_vcf_tbi,
+      input_vcfs = ParallelFilterByRegion.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
       summary_report = SummaryStats.report,
-      root_name = SummaryStats.root_name
+      root_name = SummaryStats.root_name,
+      disk_gb = ceil(size(ParallelFilterByRegion.filtered_vcf, "GB")) + 20
   }
 
   output {
@@ -94,33 +116,29 @@ workflow wes_chrom {
 
 task ComputeStats {
   input {
-    File input_vcf
+    String input_vcf
     Int cpu_count = 8
+    Int disk_gb = 20
   }
-
-  File input_vcf_tbi = input_vcf + ".tbi"
-  Int disk_size = ceil(size(input_vcf, 'GB')) + 10
 
   command <<<
   set -euo
 
   echo "=== Computing statistics and creating sample ==="
-  
+
   CHUNKS=~{cpu_count}
-  
-  # Touch index to ensure it's localized
-  touch ~{input_vcf_tbi}
+  fuse_vcf=$(echo "~{input_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
 
   # Get chromosome from first variant
-  chrom=$(bcftools query -f '%CHROM\n' "~{input_vcf}" | head -n 1)
+  chrom=$(bcftools query -f '%CHROM\n' "$fuse_vcf" | head -n 1)
   echo "Chromosome: $chrom"
 
   # Get chromosome and contig length from index
-  read chrom_idx contig_len < <(bcftools index -s "~{input_vcf}" | awk '{print $1, $2}')
+  read chrom_idx contig_len < <(bcftools index -s "$fuse_vcf" | awk '{print $1, $2}')
   echo "Contig length: $contig_len"
 
   # Get first position
-  first_pos=$(bcftools view -H "~{input_vcf}" | head -n 1 | cut -f2)
+  first_pos=$(bcftools view -H "$fuse_vcf" | head -n 1 | cut -f2)
   echo "First variant position: $first_pos"
 
   # Binary search for last variant position
@@ -129,7 +147,7 @@ task ComputeStats {
   high=$contig_len
   while (( low <= high )); do
     mid=$(( (low + high) / 2 ))
-    if bcftools view -H -r "$chrom:$mid-$high" "~{input_vcf}" 2>/dev/null | head -n 1 | grep -q .; then
+    if bcftools view -H -r "$chrom:$mid-$high" "$fuse_vcf" 2>/dev/null | head -n 1 | grep -q .; then
       low=$(( mid + 1 ))
     else
       high=$(( mid - 1 ))
@@ -138,7 +156,7 @@ task ComputeStats {
 
   # Get exact last position from narrow window
   search_start=$(( high > 10000 ? high - 10000 : first_pos ))
-  last_pos=$(bcftools view -H -r "$chrom:$search_start-$high" "~{input_vcf}" | tail -n 1 | cut -f2)
+  last_pos=$(bcftools view -H -r "$chrom:$search_start-$high" "$fuse_vcf" | tail -n 1 | cut -f2)
   echo "Last variant position: $last_pos"
   echo ""
 
@@ -151,13 +169,13 @@ task ComputeStats {
   #!/bin/bash
   input_file="$1"
   region_file="$2"
-  
+
   bcftools query -f '%POS\n' "$input_file" -R "$region_file" > "${region_file}.positions"
   SCRIPT_EOF
   chmod +x extract_chunk.sh
 
   echo "Extracting positions in parallel..."
-  ls region_chunk_* | sort -V | parallel -j $CHUNKS './extract_chunk.sh "~{input_vcf}" {}'
+  ls region_chunk_* | sort -V | parallel -j $CHUNKS "./extract_chunk.sh '$fuse_vcf' {}"
 
   echo "Concatenating and sorting position files..."
   cat region_chunk_*.positions | sort -n -u > positions.txt
@@ -165,20 +183,24 @@ task ComputeStats {
   # Count total variants
   variant_count=$(wc -l < positions.txt)
   echo "Total variants: $variant_count"
-  
+
+  # Count samples
+  n_samples=$(bcftools query -l "$fuse_vcf" | wc -l)
+  echo "Total samples: $n_samples"
+
   # Cleanup intermediate files
   rm -f region_chunk_*.positions extract_chunk.sh region_chunk_*
   
   # Create a small sample VCF (100 variants) for validation
   echo "Creating sample VCF for validation (100 variants)..."
-  bcftools view -h "~{input_vcf}" | bgzip -c > sample.vcf.gz
-  bcftools view -H "~{input_vcf}" | head -n 100 | bgzip -c >> sample.vcf.gz
+  bcftools view -h "$fuse_vcf" | bgzip -c > sample.vcf.gz
+  bcftools view -H "$fuse_vcf" | head -n 100 | bgzip -c >> sample.vcf.gz
   tabix -p vcf sample.vcf.gz
   echo "Sample VCF created: $(bcftools view -H sample.vcf.gz | wc -l) variants"
-  
+
   # Create stats file
-  echo -e "variant_count\t$variant_count" > stats.txt
-  
+  printf "variant_count\t%s\nn_samples\t%s\n" "$variant_count" "$n_samples" > stats.txt
+
   echo "=== Complete ==="
   >>>
 
@@ -191,32 +213,83 @@ task ComputeStats {
 
   runtime {
     memory: "4G"
-    disks: "local-disk ~{disk_size} HDD"
+    disks: "local-disk ~{disk_gb} HDD"
     cpu: cpu_count
+    preemptible: 1
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Expands a raw denials list (one ID per line) to include every alias of each
+# denied ID, per the alias groups in `aliases` (same tab-delimited group-per-
+# line format as resolve_mapping.py's DEFAULT_ALIASES / load_aliases). Needed
+# because the ID recorded in the denials list and the ID actually present in a
+# given exome VCF's header can be different aliases of the same participant —
+# bcftools view -S ^denials only matches literal strings, so PreFilter would
+# otherwise fail to exclude (or hard-error on) a denied sample whose header ID
+# is an alias rather than the one on the denials list.
+# ---------------------------------------------------------------------------
+task ExpandDenials {
+  input {
+    File denials    # plain list, one ID per line
+    File aliases    # tab-delimited alias groups, one group per line
+  }
+
+  command <<<
+  set -euo pipefail
+  python3 << 'PY'
+denied = {line.strip() for line in open("~{denials}") if line.strip()}
+expanded = set(denied)
+with open("~{aliases}") as fh:
+    for line in fh:
+        ids = [x.strip() for x in line.strip().split("\t") if x.strip()]
+        if len(ids) < 2:
+            continue
+        if denied & set(ids):
+            expanded.update(ids)
+with open("expanded_denials.txt", "w") as out:
+    for id_ in sorted(expanded):
+        out.write(id_ + "\n")
+print(f"Expanded {len(denied)} denied IDs to {len(expanded)} IDs (incl. aliases)")
+PY
+  >>>
+
+  output {
+    File expanded_denials = "expanded_denials.txt"
+  }
+
+  runtime {
+    memory: "2G"
+    disks: "local-disk 10 HDD"
+    cpu: 1
     preemptible: 1
   }
 }
 
 task PreFilter {
   input {
-    File input_vcf
+    String input_vcf
     Int cpu_count
+    File denials    # sample IDs to remove, one per line
+    Int disk_gb
   }
 
-  File input_vcf_tbi = input_vcf + ".tbi"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
-  Int disk_size = ceil(size(input_vcf, 'GB') * 2) + 20
 
   command <<<
   set -euo
   THREADS=$(nproc)
-  touch ~{input_vcf_tbi}
+  fuse_vcf=$(echo "~{input_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
 
-  echo "=== Pre-Filter: remove AC==0 and annotate IDs ==="
+  echo "=== Pre-Filter: remove denied samples, AC==0, and annotate IDs ==="
   echo "Input: ~{input_vcf}"
+  echo "Removing denied samples listed in ~{denials}"
+  echo "(--force-samples: denials list may include IDs not present in this VCF's header)"
 
-  TARGET_SIZE=$(stat -c%s ~{input_vcf})
-  bcftools view --threads $THREADS -i 'AC>0' ~{input_vcf} -Ou | \
+  TARGET_SIZE=$(stat -c%s "$fuse_vcf")
+  bcftools view --threads $THREADS -S ^~{denials} --force-samples "$fuse_vcf" -Ou | \
+    bcftools +fill-tags --threads $THREADS -Ou -- -t AC | \
+    bcftools view --threads $THREADS -i 'AC>0' -Ou | \
     bcftools annotate --threads $THREADS --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz | \
     pv -s $TARGET_SIZE -N "prefilter" -i 60 > ~{base_name}.prefiltered.vcf.gz
 
@@ -231,7 +304,7 @@ task PreFilter {
 
   runtime {
     memory: "8 GB"
-    disks: "local-disk ~{disk_size} HDD"
+    disks: "local-disk ~{disk_gb} HDD"
     cpu: cpu_count
     preemptible: 1
   }
@@ -239,26 +312,24 @@ task PreFilter {
 
 task ParallelFilterByRegion {
   input {
-    File input_vcf
+    String input_vcf
     File positions
     String genotype_filter
     String variant_filter
     Int cpu_count
     File norm_fasta
+    Int disk_gb
   }
 
-  File input_vcf_tbi = input_vcf + ".tbi"
   File norm_fasta_fai = norm_fasta + ".fai"
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
-  Int disk_size = ceil(size(input_vcf,'GB')*3) + 20
   Int memory_gb = 64
 
   command <<<
   set -euo
 
-  input_file="~{input_vcf}"
+  input_file=$(echo "~{input_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
   CHUNKS=~{cpu_count}
-  touch ~{input_vcf_tbi}
   touch ~{norm_fasta_fai}
 
   echo "=== Parallel Filter by Region ==="
@@ -342,7 +413,7 @@ EOF
 
   runtime {
     memory: "~{memory_gb} GB"
-    disks: "local-disk ~{disk_size} HDD"
+    disks: "local-disk ~{disk_gb} HDD"
     cpu: cpu_count
     preemptible: 1
   }
@@ -466,35 +537,36 @@ task ValidateFiltering {
 
 task SubsetSamples {
   input {
-    File input_vcf
+    String input_vcf
     Int sample_count
+    Int disk_gb = 50
   }
 
   String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
   String output_vcf = base_name + ".subset_" + sample_count + "samples.vcf.gz"
   String output_tbi = base_name + ".subset_" + sample_count + "samples.vcf.gz.tbi"
-  Int disk_size = ceil(size(input_vcf, 'GB') * 2) + 20
 
   command <<<
   set -euo
-    
+
   THREADS=$(nproc)
   NCOLS=$((9 + ~{sample_count}))
-    
+  fuse_vcf=$(echo "~{input_vcf}" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+
   echo "=== Subsetting VCF to first ~{sample_count} samples (columns 1-$NCOLS) ==="
-  
+
   # Extract metadata lines (##) - keep intact
   echo "Processing metadata..."
-  bcftools view -h "~{input_vcf}" | grep "^##" | bgzip -@ $THREADS -c > ~{output_vcf}
-  
+  bcftools view -h "$fuse_vcf" | grep "^##" | bgzip -@ $THREADS -c > ~{output_vcf}
+
   # Extract and cut column header line (#CHROM)
   echo "Processing column header..."
-  bcftools view -h "~{input_vcf}" | grep "^#CHROM" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
-  
+  bcftools view -h "$fuse_vcf" | grep "^#CHROM" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
+
   # Extract and cut body (skip all header lines starting with #)
   echo "Processing body..."
-  zcat "~{input_vcf}" | grep -v "^#" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
-  
+  zcat "$fuse_vcf" | grep -v "^#" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
+
   echo "Indexing..."
   tabix -p vcf ~{output_vcf}
   echo "=== Complete ==="
@@ -507,7 +579,7 @@ task SubsetSamples {
 
   runtime {
     memory: "8G"
-    disks: "local-disk ~{disk_size} HDD"
+    disks: "local-disk ~{disk_gb} HDD"
     cpu: 4
     preemptible: 1
   }
@@ -515,23 +587,19 @@ task SubsetSamples {
 
 task ConcatVcfs {
   input {
-    Array[File] input_vcfs
-    Array[File] input_vcf_tbis
+    Array[String] input_vcfs   # Array[File] coerced to Array[String] at call site — no localisation
     File summary_report
     String root_name
+    Int disk_gb
   }
-
-  Int disk_size = ceil(size(input_vcfs, 'GB') * 2) + 20
 
   command <<<
   set -euo
   THREADS=$(nproc)
 
-  # Touch indices to ensure localization
-  while IFS= read -r tbi; do touch "$tbi"; done < ~{write_lines(input_vcf_tbis)}
-
   echo "=== Concatenating VCF shards ==="
-  awk -F'/' '{print $NF"\t"$0}' ~{write_lines(input_vcfs)} | sort -V | cut -f2- > sorted_vcf_list.txt
+  sed 's|gs://[^/]*/|/mnt/disks/gcs/|' ~{write_lines(input_vcfs)} | \
+    awk -F'/' '{print $NF"\t"$0}' | sort -V | cut -f2- > sorted_vcf_list.txt
   bcftools concat --threads $THREADS -f sorted_vcf_list.txt -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
 
   echo "Indexing..."
@@ -549,7 +617,7 @@ task ConcatVcfs {
 
   runtime {
     memory: "8 GB"
-    disks: "local-disk ~{disk_size} HDD"
+    disks: "local-disk ~{disk_gb} HDD"
     cpu: 16
   }
 }
@@ -574,7 +642,7 @@ task SummaryStats {
   echo "Root name: $root"
 
   # Create header
-  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped" > summary.report.txt
+  echo -e "chromosome\toriginal_variants\tfiltered_variants\tpercent_dropped\toriginal_samples\tfiltered_samples\tsamples_removed" > summary.report.txt
   
   # Process each VCF file
   idx=0
@@ -606,21 +674,27 @@ task SummaryStats {
     else
       pct_dropped="0.00"
     fi
-    
-    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}" >> summary.report.txt
+
+    # Sample count is the same cohort across every chromosome of this dataset —
+    # tracked per-chromosome as a sanity check, not summed into the TOTAL row below.
+    orig_samples=$(grep "n_samples" "$orig_stats_file" | cut -f2)
+    filt_samples=$(grep "n_samples" "$filt_stats_file" | cut -f2)
+    samples_removed=$((orig_samples - filt_samples))
+
+    echo -e "${chrom}\t${orig_count}\t${filt_count}\t${pct_dropped}\t${orig_samples}\t${filt_samples}\t${samples_removed}" >> summary.report.txt
     idx=$((idx + 1))
   done < <(cat << 'EOF'
 ~{sep='\n' vcf_file_names}
 EOF
 )
-  
+
   # Add totals row
   echo "" >> summary.report.txt
   total_orig=$(grep "variant_count" ~{sep=' ' original_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_filt=$(grep "variant_count" ~{sep=' ' filtered_stats} | cut -f2 | awk '{sum+=$1} END {print sum}')
   total_pct=$(awk "BEGIN {printf \"%.2f\", (($total_orig - $total_filt) / $total_orig) * 100}")
-  
-  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}" >> summary.report.txt
+
+  echo -e "TOTAL\t${total_orig}\t${total_filt}\t${total_pct}\t${orig_samples}\t${filt_samples}\t${samples_removed}" >> summary.report.txt
   
   echo ""
   echo "Summary Table:"

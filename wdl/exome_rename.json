@@ -1,9 +1,8 @@
 {
     "exome_rename.resolved_mapping": "gs://fg-3/exome_v2/data/finngen_R14_exome_id_mapping.tsv",
-    "exome_rename.chunk_mb": 2000,
+    "exome_rename.chunk_mb": 1800,
     "exome_rename.suffix": "fg_ids",
     #Test mode, remove to run all of them
-    
     "exome_rename.chroms":  ["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10", "chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19", "chr20","chr21","chr22","chrX","chrY"],
     "exome_rename.vcf_pairs": [["BOTNIA", "gs://fg-3/exome_v2/data/QC/THLBB2023_14_WES_Botnia.QC_ANNOTATED.vcf.gz"], ["ADPKD",  "gs://fg-3/exome_v2/data/QC/likely_pathogenic_annot_annotated_full_header_fix_resampled.QC_ANNOTATED.vcf.gz"], ["DALY",   "gs://fg-3/exome_v2/data/QC/fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly.QC_ANNOTATED.vcf.gz"],["WES",    "gs://fg-3/exome_v2/data/QC/finngen_wes_gnomad_v4.QC_ANNOTATED.vcf.gz"]]
 
