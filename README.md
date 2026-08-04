@@ -516,6 +516,16 @@ All three QC workflows below (`wes_chrom.wdl`, `single_file_qc.wdl`, `daly_qc.wd
 
 Each workflow runs a shared `ExpandDenials` task once per workflow (not once per chromosome/region) that expands the raw denial list to include every alias of each denied ID, before the per-chromosome/per-region filtering step applies `bcftools view -S ^<expanded_denials> --force-samples`. `--force-samples` lets the denial list contain IDs absent from a given VCF's samples (e.g. belonging to a different cohort) without hard-failing the task.
 
+**Samples removed per dataset** (from validation reports of the current `QC_ANNOTATED` release):
+
+| Dataset | Original samples | Filtered samples | Removed |
+|---|---:|---:|---:|
+| DALY | 12,405 | 12,389 | 16 |
+| WES | 25,201 | 25,197 | 4 |
+| BOTNIA | 7,164 | 7,161 | 3 |
+| ADPKD | 629 | 628 | 1 |
+| **Total** | **45,399** | **45,375** | **24** |
+
 ---
 
 ### WDL Workflows
