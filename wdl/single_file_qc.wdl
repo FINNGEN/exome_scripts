@@ -387,8 +387,15 @@ task ValidateFiltering {
   printf "%-30s %10s %10s %10s\n" "----------" "--------" "--------" "---------" >> ~{report_name}
 
   # Sort chromosomes by original count (descending)
+  # Compare chrom names with any "chr" prefix stripped on both sides: FilterByChromosome
+  # renames to chr-prefixed output when the input isn't already chr-prefixed, so a literal
+  # name join here would otherwise silently fail (e.g. "1" vs "chr1") and default every
+  # filtered count to 0.
+  sed 's/^chr//' filtered_chrom_counts.txt > filtered_chrom_counts_norm.txt
+
   sort -t$'\t' -k2 -nr original_chrom_counts.txt | while IFS=$'\t' read chrom orig_count; do
-    filt_count=$(grep -Fw "$chrom" filtered_chrom_counts.txt | awk '{print $2}')
+    chrom_norm="${chrom#chr}"
+    filt_count=$(grep -Fw "$chrom_norm" filtered_chrom_counts_norm.txt | awk '{print $2}')
     [[ -z "$filt_count" ]] && filt_count=0
     
     if [[ "$orig_count" -gt 0 ]]; then
@@ -399,6 +406,18 @@ task ValidateFiltering {
     
     printf "%-30s %10s %10s %9s%%\n" "$chrom" "$orig_count" "$filt_count" "$pct_dropped" >> ~{report_name}
   done
+
+  # Totals across all chromosomes. Computed independently of the loop above (which runs in a
+  # subshell via the pipe from `sort`, so its per-iteration variables don't survive past `done`).
+  orig_total=$(awk -F'\t' '{s+=$2} END{print s+0}' original_chrom_counts.txt)
+  filt_total=$(awk -F'\t' '{s+=$2} END{print s+0}' filtered_chrom_counts_norm.txt)
+  if [[ "$orig_total" -gt 0 ]]; then
+    total_pct_dropped=$(awk "BEGIN {printf \"%.1f\", (($orig_total - $filt_total) / $orig_total) * 100}")
+  else
+    total_pct_dropped="0.0"
+  fi
+  printf "%-30s %10s %10s %10s\n" "----------" "--------" "--------" "---------" >> ~{report_name}
+  printf "%-30s %10s %10s %9s%%\n" "TOTAL" "$orig_total" "$filt_total" "$total_pct_dropped" >> ~{report_name}
 
   echo "" >> ~{report_name}
 
