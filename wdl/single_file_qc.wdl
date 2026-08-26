@@ -390,12 +390,14 @@ task ValidateFiltering {
   # Compare chrom names with any "chr" prefix stripped on both sides: FilterByChromosome
   # renames to chr-prefixed output when the input isn't already chr-prefixed, so a literal
   # name join here would otherwise silently fail (e.g. "1" vs "chr1") and default every
-  # filtered count to 0.
+  # filtered count to 0. Match on column 1 only (awk $1==c), not grep -Fw against the whole
+  # line — with alt-contig chromosomes, a short normalized name like "1" can otherwise
+  # collide with an unrelated line's *count* column when that count happens to equal "1".
   sed 's/^chr//' filtered_chrom_counts.txt > filtered_chrom_counts_norm.txt
 
   sort -t$'\t' -k2 -nr original_chrom_counts.txt | while IFS=$'\t' read chrom orig_count; do
     chrom_norm="${chrom#chr}"
-    filt_count=$(grep -Fw "$chrom_norm" filtered_chrom_counts_norm.txt | awk '{print $2}')
+    filt_count=$(awk -F'\t' -v c="$chrom_norm" '$1==c {print $2; exit}' filtered_chrom_counts_norm.txt)
     [[ -z "$filt_count" ]] && filt_count=0
     
     if [[ "$orig_count" -gt 0 ]]; then
