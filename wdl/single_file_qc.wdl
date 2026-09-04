@@ -3,6 +3,7 @@ version 1.0
 workflow single_file_qc {
   input {
     Array[File] vcf_files
+    Array[String] root_names      # output filename root per vcf_files entry, same order/length
     String genotype_filter
     String variant_filter
     Int cpu_count
@@ -24,7 +25,10 @@ workflow single_file_qc {
       aliases = aliases
   }
 
-  scatter (vcf in vcf_files) {
+  scatter (pair in zip(vcf_files, root_names)) {
+    File vcf = pair.left
+    String root_name = pair.right
+
     if (defined(test_sample_count)) {
       call SubsetSamples {
         input:
@@ -43,6 +47,7 @@ workflow single_file_qc {
     call FilterByChromosome {
       input:
         input_vcf = vcf_to_filter,
+        root_name = root_name,
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
         cpu_count = cpu_count,
@@ -123,6 +128,7 @@ PY
 task FilterByChromosome {
   input {
     File input_vcf
+    String root_name    # output filename root — not derived from the raw input VCF's name
     String genotype_filter
     String variant_filter
     Int cpu_count
@@ -132,9 +138,8 @@ task FilterByChromosome {
 
   File input_vcf_index = input_vcf + ".tbi"
   File norm_fasta_fai = norm_fasta + ".fai"
-  String base_name = basename(basename(basename(input_vcf, ".vcf.gz"), ".vcf.bgz"), ".bcf")
-  String output_vcf = base_name + ".QC_ANNOTATED.vcf.gz"
-  String output_tbi = base_name + ".QC_ANNOTATED.vcf.gz.tbi"
+  String output_vcf = root_name + ".QC_ANNOTATED.vcf.gz"
+  String output_tbi = root_name + ".QC_ANNOTATED.vcf.gz.tbi"
   Int disk_size = ceil(size(input_vcf, 'GB') * 3) + 20
   Int memory_gb = cpu_count * 2 + 4
 

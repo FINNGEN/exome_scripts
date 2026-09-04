@@ -1,8 +1,9 @@
 version 1.0
 
-workflow wes_chrom {
+workflow gnomad_wes_finns_chrom {
   input {
     File vcf_list
+    String root_name                # output filename root, e.g. "gnomAD_v4_Finns_subset"
     String genotype_filter
     String variant_filter
     Int cpu_count
@@ -98,7 +99,7 @@ workflow wes_chrom {
     input:
       input_vcfs = ParallelFilterByRegion.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
       summary_report = SummaryStats.report,
-      root_name = SummaryStats.root_name,
+      root_name = root_name,   # explicit output root — not derived from the raw input VCF's name
       disk_gb = ceil(size(ParallelFilterByRegion.filtered_vcf, "GB")) + 20
   }
 
@@ -293,7 +294,7 @@ task PreFilter {
     bcftools annotate --threads $THREADS --set-id +'%CHROM\_%POS\_%REF\_%ALT' -Oz | \
     pv -s $TARGET_SIZE -N "prefilter" -i 60 > ~{base_name}.prefiltered.vcf.gz
 
-  tabix -p vcf ~{base_name}.prefiltered.vcf.gz
+  tabix --threads $THREADS -p vcf ~{base_name}.prefiltered.vcf.gz
   echo "=== Complete! ==="
   >>>
 
@@ -397,7 +398,7 @@ EOF
   bcftools concat -n -f chunk_list.txt -Oz -o ~{base_name}.filtered.vcf.gz
   
   echo "Indexing output..."
-  tabix -p vcf ~{base_name}.filtered.vcf.gz
+  tabix --threads $(nproc) -p vcf ~{base_name}.filtered.vcf.gz
   
   # Cleanup
   echo "Cleaning up temporary files..."
@@ -568,7 +569,7 @@ task SubsetSamples {
   zcat "$fuse_vcf" | grep -v "^#" | cut -f 1-$NCOLS | bgzip -@ $THREADS -c >> ~{output_vcf}
 
   echo "Indexing..."
-  tabix -p vcf ~{output_vcf}
+  tabix --threads $THREADS -p vcf ~{output_vcf}
   echo "=== Complete ==="
   >>>
 
@@ -603,7 +604,7 @@ task ConcatVcfs {
   bcftools concat --threads $THREADS -f sorted_vcf_list.txt -Oz -o ~{root_name}.QC_ANNOTATED.vcf.gz
 
   echo "Indexing..."
-  tabix -p vcf ~{root_name}.QC_ANNOTATED.vcf.gz
+  tabix --threads $THREADS -p vcf ~{root_name}.QC_ANNOTATED.vcf.gz
 
   cp ~{summary_report} ~{root_name}.QC_ANNOTATED.report.txt
   echo "=== Complete ==="
@@ -623,6 +624,10 @@ task ConcatVcfs {
 }
 
 task SummaryStats {
+  # Builds a per-chromosome stats table. Also guesses a root name from the input
+  # VCF filenames (root_name.txt / root_name output below), but that guess is
+  # informational only — the actual output filename root comes from the
+  # workflow-level `root_name` input, not from this task.
   input {
     Array[String] vcf_file_names
     Array[File] original_stats

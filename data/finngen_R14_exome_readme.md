@@ -8,13 +8,13 @@ Exome sequencing data processed from 45,375 samples across four sequencing batch
 
 The pipeline processes exome datasets from multiple sequencing batches through three main steps: quality control filtering, genetic verification of individual identity and ID mapping to existing FinnGen IDs, and merging with the FinnGen imputed genotype array into a joint plink dataset.
 
-| Dataset | Samples |
-|---|---:|
-| finngen_wes_gnomad_v4 | 25,197 |
-| fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly | 12,389 |
-| THLBB2023_14_WES_Botnia | 7,161 |
-| likely_pathogenic_annot_annotated_full_header_fix_resampled | 628 |
-| **Total** | **45,375** |
+| Long name | Short name | Samples | Description |
+|---|---|---:|---|
+| gnomAD v4 Finns subset | `gnomad_wes_finns` | 25,197 | Mix of legacy cohorts, mostly mental disorders, from eastern Finland |
+| Blended Genome Exome scizophrenia, bipolar, controls | `BGE_scz_bp_ctrl` | 12,389 | Bipolar & schizophrenia cohort |
+| Botnia THL diabetes study | `botnia` | 7,161 | Diabetes cohort |
+| Autosomal dominant polycystic kidney disease WES (ADPKD) | `ADPKD` | 628 | Autosomal dominant polycystic kidney disease, likely pathogenic |
+| **Total** | | **45,375** | |
 
 ---
 
@@ -22,7 +22,7 @@ The pipeline processes exome datasets from multiple sequencing batches through t
 
 Each input exome dataset was independently processed through a per-chromosome QC pipeline run in parallel. The following operations were applied to each chromosome:
 
-- **Sample exclusion**: samples on a registry-mandated denial list — expanded to include every known alias of each denied ID — are removed before any other QC step. 24 samples were excluded this way across the four datasets (DALY 16, WES 4, BOTNIA 3, ADPKD 1); the sample counts in the table above are post-exclusion.
+- **Sample exclusion**: samples on a registry-mandated denial list — expanded to include every known alias of each denied ID — are removed before any other QC step. 24 samples were excluded this way across the four datasets (BGE_scz_bp_ctrl 16, gnomad_wes_finns 4, botnia 3, ADPKD 1); the sample counts in the table above are post-exclusion.
 - **Chromosome name normalisation**: non-`chr`-prefixed contig names are renamed to the standard `chr` prefix.
 - **FASTA normalisation**: variants are normalised against the GRCh38 reference using `bcftools norm`. Multi-allelic sites are split into biallelic records, indels are left-aligned, and REF mismatches are flagged and excluded.
 - **Genotype masking**: genotypes with DP < 10 or GQ < 20 are set to missing.

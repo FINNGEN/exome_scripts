@@ -1,9 +1,10 @@
 version 1.0
 
-workflow daly_qc {
+workflow bge_qc {
   input {
     File          vcf_list                                    # one GCS path per line
     File          rename_file                                 # TSV: FINNGENID_finngen(1) FINNGENID_biobank(2) SAMPLE_ID(3) ...
+    String        root_name                                   # output filename root, e.g. "Blended_Genome_Exome_scizophrenia_bipolar_controls"
     String        filter_expression = "FILTER~'NO_HQ_GENOTYPES'"
     Int           cpu_count        = 8
     Int           vcf_max_gb       = 25  # size of the largest VCF; drives disk allocation
@@ -76,7 +77,7 @@ workflow daly_qc {
     input:
       vcf_files      = ParallelFilter.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
       summary_report = SummaryStats.report,
-      root_name      = SummaryStats.root_name,
+      root_name      = root_name,                     # explicit output root — not derived from the raw input VCF's name
       cpu_count      = cpu_count
   }
 
@@ -456,7 +457,10 @@ task ValidateFiltering {
 
 
 # ── SummaryStats ──────────────────────────────────────────────────────────────
-# Derives root name from VCF filenames and builds a per-chromosome stats table.
+# Builds a per-chromosome stats table. Also guesses a root name from the input
+# VCF filenames (root_name.txt / root_name output below), but that guess is
+# informational only — the actual output filename root comes from the
+# workflow-level `root_name` input, not from this task.
 
 task SummaryStats {
   input {

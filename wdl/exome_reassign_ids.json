@@ -1,0 +1,21 @@
+{
+    "exome_reassign_ids.vcf_pairs": [
+        ["botnia",           "gs://fg-3/exome_v2/release/data/qc_vcf_full/Botnia_THL_diabetes_study.QC_ANNOTATED.vcf.gz"],
+        ["ADPKD",            "gs://fg-3/exome_v2/release/data/qc_vcf_full/Autosomal_dominant_polycystic_kidney_disease_WES_ADPKD.QC_ANNOTATED.vcf.gz"],
+        ["BGE_scz_bp_ctrl",  "gs://fg-3/exome_v2/release/data/qc_vcf_full/Blended_Genome_Exome_scizophrenia_bipolar_controls.QC_ANNOTATED.vcf.gz"],
+        ["gnomad_wes_finns", "gs://fg-3/exome_v2/release/data/qc_vcf_full/gnomAD_v4_Finns_subset.QC_ANNOTATED.vcf.gz"]
+    ],
+
+    "exome_reassign_ids.n_regions": 120,
+    "exome_reassign_ids.chunk_size": 10000,
+    "exome_reassign_ids.max_het_F": 0.5,
+    "exome_reassign_ids.plink_prefix": "FG",
+    "exome_reassign_ids.out_prefix": "finngen_R14_exome",
+    "exome_reassign_ids.plink_bed": "gs://fg-cromwell-4/fuse_test/plink_hm3/finngen_R14_hm3.bed",
+    "exome_reassign_ids.aliases": "gs://fg-3/exome_v2/inputs/finngen_R14_duplicate_list.txt",
+
+    "exome_reassign_ids.run_rename": false,
+    "exome_reassign_ids.chunk_mb": 1800,
+    "exome_reassign_ids.suffix": "fg_ids",
+    "exome_reassign_ids.chroms": ["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10", "chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19", "chr20","chr21","chr22","chrX","chrY"]
+}
