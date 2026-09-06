@@ -180,9 +180,12 @@ task ComputeStats {
 
   echo "Concatenating and sorting position files..."
   cat region_chunk_*.positions | sort -n -u > positions.txt
-  
-  # Count total variants
-  variant_count=$(wc -l < positions.txt)
+
+  # Count total variants — via bcftools index -s (true record count), NOT via
+  # positions.txt: that file is deduplicated (sort -n -u) for region-chunk
+  # boundary purposes only, so wc -l on it silently undercounts any position
+  # with more than one record (e.g. multiallelic sites pre-normalisation).
+  variant_count=$(bcftools index -s "$fuse_vcf" | awk '{sum+=$3} END {print sum}')
   echo "Total variants: $variant_count"
 
   # Count samples

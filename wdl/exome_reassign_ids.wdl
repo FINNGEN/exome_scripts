@@ -857,10 +857,6 @@ task GatherResults {
     File id_mapping_flowchart = out_prefix + "_id_mapping_flowchart.png"
   }
 
-  meta {
-    volatile: true
-  }
-
   runtime {
     docker: docker
     disks:  "local-disk 20 HDD"
@@ -987,7 +983,13 @@ task BuildAllRegions {
 
 # -----------------------------------------------------------------------
 # Stream one region, subset + rename samples.
-# prefix = DATASET_CHUNKIDX → dataset derived by cutting at '_'
+# prefix = DATASET_CHROM_CHUNKIDX → dataset derived by stripping the
+# trailing _chrN_NNN suffix, NOT by cutting at the first '_': dataset
+# tokens like "BGE_scz_bp_ctrl" and "gnomad_wes_finns" contain underscores
+# themselves, so cutting at the first '_' truncates them (e.g. to just
+# "BGE"), which then matches nothing in resolved_mapping's DATASET column
+# and silently produces an empty sample list ("subsetting has removed all
+# samples" / "missing FORMAT fields" from bcftools).
 # -----------------------------------------------------------------------
 task SubsetChunk {
   input {
@@ -1000,7 +1002,7 @@ task SubsetChunk {
     Int    disk_gb = chunk_mb * 3 / 1024 + 5
   }
 
-  String dataset = sub(prefix, "_.*", "")
+  String dataset = sub(prefix, "_chr[0-9XY]+_[0-9]+$", "")
   String out     = prefix + ".vcf.gz"
 
   command <<<
