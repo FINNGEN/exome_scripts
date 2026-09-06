@@ -29,7 +29,7 @@ Run all three QC workflows — each dataset is independent, so these three can r
 Run `wdl/exome_reassign_ids.wdl` (`wdl/exome_reassign_ids.json`) — see [exome_reassign_ids.wdl](#exome_reassign_idswdl).
 
 1. Submit with `run_rename: false`. Inspect `id_mapping` / `id_mapping_stats` / `id_mapping_flowchart` before trusting the mapping.
-2. Once satisfied, either resubmit the same workflow with `run_rename: true` to also subset+rename the per-chromosome VCFs, or skip this for now and come back to it later — it's optional at this point. Resubmitting only reruns the newly-enabled rename sub-workflow; Cromwell call-caches the untouched kinship calls.
+2. Once satisfied, either resubmit the same workflow with `run_rename: true` to also subset+rename the per-chromosome VCFs, or skip this for now and come back to it later — it's optional at this point. Resubmitting only reruns the newly-enabled rename stage; Cromwell call-caches the untouched kinship calls.
 
 ### 3. LD, pass 1 — merge + raw LD
 
@@ -82,17 +82,22 @@ Resubmit `wdl/exome_ld.wdl` with `exome_ld.annot` now pointing at the VEP annota
 
 ## SAMPLE MATCHING
 
-Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship (`exome_duplicates.wdl`), followed by post-processing with `scripts/resolve_mapping.py` to produce a clean final mapping. Matched samples are then subset and renamed to FinnGen IDs (`exome_rename.wdl`).
+Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship, followed by post-processing to produce a clean final mapping. Matched samples can then be subset and renamed to FinnGen IDs. Both stages live in a single self-contained file, `wdl/exome_reassign_ids.wdl` — no imports, no sub-workflows.
 
 ### exome_reassign_ids.wdl
 
-**Chains `exome_duplicates.wdl` and `exome_rename.wdl` into one submission**, gated by a `run_rename` boolean, since `exome_rename.wdl`'s only input beyond the shared `vcf_pairs` is `resolved_mapping` — literally `exome_duplicates.wdl`'s own `id_mapping` output. Submit with `run_rename: false` first to compute and inspect the ID mapping (`id_mapping` / `id_mapping_stats` / `id_mapping_flowchart`) without paying the cost of the rename step. Once the mapping looks right, resubmit the same workflow with only `run_rename` flipped to `true` — Cromwell call-caches every upstream call (their inputs haven't changed), so only the newly-enabled `exome_rename` sub-workflow actually runs. See `wdl/exome_reassign_ids.json` for a full input example. The two sub-workflows are documented individually below.
+**One file, two stages, gated by a `run_rename` boolean:**
 
-### exome_duplicates.wdl
+1. **Kinship / duplicate detection (mandatory, always runs)** — KING-based matching between exome VCFs and the FinnGen plink reference, followed by `resolve_mapping.py`-style post-processing to produce the final QRY→REF mapping.
+2. **Subset + rename to FinnGen IDs (optional, `if (run_rename)`)** — fed `resolved_mapping` directly from stage 1's own `id_mapping` output within the same workflow scope, no file hand-off between separate submissions.
+
+Submit with `run_rename: false` first to compute and inspect the ID mapping (`id_mapping` / `id_mapping_stats` / `id_mapping_flowchart`) without paying the cost of the rename stage. Once the mapping looks right, resubmit the same workflow with only `run_rename` flipped to `true` — Cromwell call-caches every call from stage 1 (their inputs haven't changed), so only the newly-enabled stage 2 actually runs. See `wdl/exome_reassign_ids.json` for a full input example. Both stages are documented in detail below.
+
+### Stage 1 — kinship / duplicate detection (mandatory)
 
 KING-based duplicate detection between exome VCFs and the FinnGen plink reference. Preferred over gtcheck when sample counts are large — KING scales better and gives a cleaner kinship coefficient rather than a discordance rate.
 
-> Documented here for its internal step-by-step behavior. In practice this now runs as a sub-workflow of `exome_reassign_ids.wdl` in a single submission (`run_rename: false`) rather than being launched on its own — set inputs under the `exome_reassign_ids.*` namespace (see `wdl/exome_reassign_ids.json`), not `exome_duplicates.*`.
+> Inlined directly in `wdl/exome_reassign_ids.wdl` (no separate file, no import) — always runs regardless of `run_rename`.
 
 **How the workflow works:**
 
@@ -304,11 +309,11 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 
 ---
 
-### exome_rename.wdl
+### Stage 2 — subset + rename to FinnGen IDs (optional)
 
-**Sample subsetting and renaming using the QRY→REF mapping from `exome_duplicates.wdl`**
+**Sample subsetting and renaming using the QRY→REF mapping from stage 1**
 
-> Documented here for its internal step-by-step behavior. In practice this now runs as a sub-workflow of `exome_reassign_ids.wdl` (`run_rename: true`), fed `resolved_mapping` automatically from `exome_duplicates.id_mapping` — no manual hand-off of the mapping file, and no separate submission. Set inputs under the `exome_reassign_ids.*` namespace.
+> Inlined directly in `wdl/exome_reassign_ids.wdl` (no separate file, no import) — gated by `if (run_rename)`, fed `resolved_mapping` directly from stage 1's own `id_mapping` output within the same workflow scope. No manual hand-off of the mapping file, and no separate submission.
 
 **What it does:**
 
@@ -339,7 +344,7 @@ ConcatChromVCF[D×C]      scatter — selects matching chunks and concatenates
 }
 ```
 
-`resolved_mapping` is no longer a settable input in the chained workflow — it's wired internally from `exome_duplicates.id_mapping`, only rows with a non-NA, non-AMBIGUOUS `REF_MAPPED` are used. `vcf_pairs` is shared with the `exome_duplicates` stage (same pairs feed both).
+`resolved_mapping` is not a settable input — it's wired internally from stage 1's `id_mapping` output, only rows with a non-NA, non-AMBIGUOUS `REF_MAPPED` are used. `vcf_pairs` is shared with stage 1 (same pairs feed both).
 
 **Outputs:**
 
