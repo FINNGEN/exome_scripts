@@ -7,13 +7,14 @@ Exome sequencing data processed from 45,375 samples across four sequencing batch
 > For detailed pipeline documentation and source code, see the [GitHub repository](https://github.com/FINNGEN/exome_scripts)
 
 The pipeline processes exome datasets from multiple sequencing batches through three main steps: quality control filtering, genetic verification of individual identity and ID mapping to existing FinnGen IDs, and merging with the FinnGen imputed genotype array into a joint plink dataset.
+The exomes do have 1-on-1 mapping with imputed FinnGen participants with the same FinnGen ID
 
 | Long name | Short name | Samples | Description |
 |---|---|---:|---|
-| gnomAD v4 Finns subset | `gnomad_wes_finns` | 25,197 | Mix of legacy cohorts, mostly mental disorders, from eastern Finland |
-| Blended Genome Exome scizophrenia, bipolar, controls | `BGE_scz_bp_ctrl` | 12,389 | Bipolar & schizophrenia cohort |
-| Botnia THL diabetes study | `botnia` | 7,161 | Diabetes cohort |
-| Autosomal dominant polycystic kidney disease WES (ADPKD) | `ADPKD` | 628 | Autosomal dominant polycystic kidney disease, likely pathogenic |
+| gnomAD v4 Finns subset | `gnomad_wes_finns` | 25,197 | GnomAD Finns subset of individuals  already in FinnGen |
+| Blended Genome Exome scizophrenia, bipolar, controls | `BGE_scz_bp_ctrl` | 12,389 | Broad Institute sequenced Bipolar & schizophrenia and shared control cohort |
+| Botnia THL diabetes study | `botnia` | 7,161 | Botnia Diabetes cohort |
+| Autosomal dominant polycystic kidney disease WES (ADPKD) | `ADPKD` | 628 | Autosomal dominant polycystic kidney disease patients |
 | **Total** | | **45,375** | |
 
 ---
