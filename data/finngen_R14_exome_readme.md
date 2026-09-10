@@ -7,14 +7,15 @@ Exome sequencing data processed from 45,375 samples across four sequencing batch
 > For detailed pipeline documentation and source code, see the [GitHub repository](https://github.com/FINNGEN/exome_scripts)
 
 The pipeline processes exome datasets from multiple sequencing batches through three main steps: quality control filtering, genetic verification of individual identity and ID mapping to existing FinnGen IDs, and merging with the FinnGen imputed genotype array into a joint plink dataset.
+The exomes do have 1-on-1 mapping with imputed FinnGen participants with the same FinnGen ID
 
-| Dataset | Samples |
-|---|---:|
-| finngen_wes_gnomad_v4 | 25,197 |
-| fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly | 12,389 |
-| THLBB2023_14_WES_Botnia | 7,161 |
-| likely_pathogenic_annot_annotated_full_header_fix_resampled | 628 |
-| **Total** | **45,375** |
+| Long name | Short name | Samples | Description |
+|---|---|---:|---|
+| gnomAD v4 Finns subset | `gnomad_wes_finns` | 25,197 | GnomAD Finns subset of individuals  already in FinnGen |
+| Blended Genome Exome scizophrenia, bipolar, controls | `BGE_scz_bp_ctrl` | 12,389 | Broad Institute sequenced Bipolar & schizophrenia and shared control cohort |
+| Botnia THL diabetes study | `botnia` | 7,161 | Botnia Diabetes cohort |
+| Autosomal dominant polycystic kidney disease WES (ADPKD) | `ADPKD` | 628 | Autosomal dominant polycystic kidney disease patients |
+| **Total** | | **45,375** | |
 
 ---
 
@@ -22,7 +23,7 @@ The pipeline processes exome datasets from multiple sequencing batches through t
 
 Each input exome dataset was independently processed through a per-chromosome QC pipeline run in parallel. The following operations were applied to each chromosome:
 
-- **Sample exclusion**: samples on a registry-mandated denial list — expanded to include every known alias of each denied ID — are removed before any other QC step. 24 samples were excluded this way across the four datasets (DALY 16, WES 4, BOTNIA 3, ADPKD 1); the sample counts in the table above are post-exclusion.
+- **Sample exclusion**: samples on a registry-mandated denial list — expanded to include every known alias of each denied ID — are removed before any other QC step. 24 samples were excluded this way across the four datasets (BGE_scz_bp_ctrl 16, gnomad_wes_finns 4, botnia 3, ADPKD 1); the sample counts in the table above are post-exclusion.
 - **Chromosome name normalisation**: non-`chr`-prefixed contig names are renamed to the standard `chr` prefix.
 - **FASTA normalisation**: variants are normalised against the GRCh38 reference using `bcftools norm`. Multi-allelic sites are split into biallelic records, indels are left-aligned, and REF mismatches are flagged and excluded.
 - **Genotype masking**: genotypes with DP < 10 or GQ < 20 are set to missing.
@@ -110,6 +111,29 @@ For each FinnGen credible set lead variant, exome variants in LD (r² ≥ 0.05, 
 
 FinnGen imputed array variants and exome variants are jointly converted to plink1 binary format and merged per chromosome. For each chromosome, the FG plink fileset (subsetted to the 43,289 matched exome samples) and all four exome plink filesets are merged via `plink --merge-list` into a single combined BED/BIM/FAM. Exome-private variants are included alongside FinnGen array variants; variants already present in the FG BIM are excluded from the exome filesets to avoid duplication. The resulting filesets span chromosomes 1–23 and contain ~31.1 million variants across 43,289 samples.
 
+### Hardy-Weinberg equilibrium
+
+For each exome dataset, Hardy-Weinberg equilibrium is tested per autosomal chromosome (chr1–chr22) on that dataset's own per-chromosome plink fileset using plink2 `--hardy`. Allele frequency (`ALT_FREQS`/`OBS_CT`) is computed directly from `--hardy`'s own genotype counts rather than a separate `--freq` run, then concatenated across chromosomes in order into one gzipped per-dataset summary.
+
+#### Per-dataset HWE summary (`[EXOME_DATASET].hwe_summary.tsv.gz`)
+
+One row per variant, autosomes only. Columns:
+
+| Column | Description |
+|---|---|
+| `#CHROM` | Chromosome |
+| `ID` | Variant ID (`CHROM_POS_REF_ALT` format) |
+| `A1` | Reference allele for the HWE test |
+| `AX` | Non-A1 allele(s) |
+| `HOM_A1_CT` | Count of samples homozygous for A1 |
+| `HET_A1_CT` | Count of heterozygous samples |
+| `TWO_AX_CT` | Count of samples homozygous for the non-A1 allele |
+| `O(HET_A1)` | Observed heterozygous A1 frequency |
+| `E(HET_A1)` | Expected heterozygous A1 frequency under HWE |
+| `P` | Hardy-Weinberg exact test p-value |
+| `ALT_FREQS` | Alternate allele frequency (derived from `--hardy`'s own genotype counts) |
+| `OBS_CT` | Number of allele observations (derived from `--hardy`'s own genotype counts) |
+
 ---
 
 ## File structure
@@ -119,15 +143,12 @@ FinnGen imputed array variants and exome variants are jointly converted to plink
 | File | Description |
 |---|---|
 | `finngen_R14_exome_id_mapping.tsv` | QRY→REF sample ID mapping with resolution status for all datasets |
-| `qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz` | QC-filtered and normalised VCF for each input dataset |
-| `qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz.tbi` | Index for QC-filtered VCF |
-| `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz` | Per-chromosome VCF with FinnGen sample IDs |
-| `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz.tbi` | Index for renamed VCF |
+| `qc_vcf_full/[EXOME_DATASET].QC_ANNOTATED.vcf.gz[.tbi]` | QC-filtered and normalised VCF for each input dataset |
+| `renamed_vcf_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].vcf.gz[.tbi]` | Per-chromosome VCF with FinnGen sample IDs |
+| `renamed_plink_chr/[EXOME_DATASET].QC_ANNOTATED_fg_ids_chr[N].{bed,bim,fam}` | Per-chromosome plink dataset, autosomes only (chr1–22); same naming as the matching renamed VCF |
 | `finngen_R14_exome.ld.tsv.gz` | All FG→exome LD pairs (r² ≥ 0.05, 1 Mb window), genome-wide; annotated with VEP consequence and allele frequency |
 | `finngen_R14_exome.ld_annotated.tsv.gz` | Exome variants in LD with FinnGen credible set leads, annotated with phenotype and credible set metadata (~900k rows) |
-| `plink_fg_merged_chr/finngen_R14_exome_chr[N].bed` | Per-chromosome merged plink BED (FG array + exome variants, 43,289 samples, chr1–23) |
-| `plink_fg_merged_chr/finngen_R14_exome_chr[N].bim` | BIM file; variant IDs in `CHROM_POS_REF_ALT` format; ~31.1 M variants genome-wide |
-| `plink_fg_merged_chr/finngen_R14_exome_chr[N].fam` | FAM file with FinnGen sample IDs |
+| `plink_fg_merged_chr/finngen_R14_exome_chr[N].{bed,bim,fam}` | Per-chromosome merged plink dataset (FG array + exome variants, 43,289 samples, chr1–23); variant IDs in `CHROM_POS_REF_ALT` format, ~31.1 M variants genome-wide |
 
 ### Documentation
 
@@ -136,6 +157,7 @@ FinnGen imputed array variants and exome variants are jointly converted to plink
 | File | Description |
 |---|---|
 | `[EXOME_DATASET].QC_ANNOTATED.report.txt` | Per-dataset QC filtering statistics by chromosome |
+| `hwe/[EXOME_DATASET].hwe_summary.tsv.gz` | Per-dataset Hardy-Weinberg equilibrium + allele frequency summary, autosomes only |
 
 #### Figures
 

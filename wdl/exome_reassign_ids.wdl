@@ -1,8 +1,60 @@
 version 1.0
 
-workflow exome_duplicates {
+# Single self-contained workflow: kinship-based ID resolution (mandatory) plus
+# an optional subset+rename stage — formerly two separate WDLs
+# (exome_duplicates.wdl, exome_rename.wdl), now fully inlined into one file.
+#
+# Run with run_rename = false first to compute and inspect the ID mapping
+# (id_mapping / id_mapping_stats / id_mapping_flowchart) without paying the
+# cost of the rename stage. Once the mapping looks right, resubmit the same
+# workflow with only run_rename = true changed — Cromwell call-caches every
+# upstream call (none of their inputs changed), so only the newly enabled
+# rename stage actually runs.
+#
+# Mandatory stage shape (formerly exome_duplicates.wdl):
+#   MakeRegionSnplists
+#         │
+#         └─ FilterVCF ×(n_vcfs × n_regions)   [parallel scatter]
+#                │
+#          ConcatVCF                            [per VCF]
+#                │
+#          SubsetQuery (VCF → plink, shared HM3 variants)
+#                │
+#           ┌────┴────────────────┐
+#      SubsetRef              FilterSNPs
+#      (ref plink →           (QC filter query plink,
+#       shared variants)       build final SNP list)
+#           │                      │
+#           └────────┬─────────────┘
+#               PrepQuery / PrepRef
+#               (subset to QC snplist, het-filter,
+#                tag IDs, split into chunks)
+#                      │
+#                 KingShards
+#                 (KING --duplicate, all chunk pairs)
+#                      │
+#               SummarizeKing
+#               (per-sample duplicate summary)
+#                      │
+#                GatherResults
+#                (combine summaries, plots, global stats,
+#                 resolve ambiguities, final mapping + stats)
+#
+# Optional rename stage shape (formerly exome_rename.wdl), gated by run_rename:
+#   QueryChromPositions[C]  one task per chrom — queries positions for all
+#                           datasets in parallel (cached per chrom)
+#   BuildAllRegions         single task — uses position files + file stats to
+#                           build per-dataset size-based chunk TSV
+#   SubsetChunk[K]          one task per (dataset × chrom × chunk)
+#   ConcatChromVCF[D×C]     cross-product scatter — greps flat VCF path array
+#                           to concat chunks for one dataset+chrom
+
+workflow exome_reassign_ids {
   input {
+    # ---- shared: same [DATASET, QC_ANNOTATED.vcf.gz] pairs feed both stages ----
     Array[Array[String]] vcf_pairs
+
+    # ---- kinship / ID resolution (mandatory) ----
     File   plink_bed
     String plink_prefix
     Int    n_regions     = 100
@@ -12,10 +64,31 @@ workflow exome_duplicates {
     Float  max_het_F     = 0.3
     Int    chunk_size    = 10000
     String out_prefix    = "finngen_R14_exome"
+
+    # ---- rename stage: subset + rename to FinnGen IDs (optional) ----
+    Boolean       run_rename = false   # flip to true and resubmit once id_mapping looks right
+    Array[String] chroms = [
+      "chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10",
+      "chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19",
+      "chr20","chr21","chr22","chrX","chrY"
+    ]
+    Int    chunk_mb = 500
+    String suffix   = "fg_ids"
+
+    # ---- HWE stage: per-dataset autosomal Hardy-Weinberg summary (runs
+    #      whenever run_rename = true, chained off ConcatChromVCF's output —
+    #      no separate VCF source needed) ----
+    String hwe_plink_conv_args = "--double-id --allow-extra-chr --vcf-half-call h"
+    Int    hwe_mem_gb = 8
+    Int    hwe_cpu    = 4
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
   File plink_fam = sub(plink_bed, "\\.bed$", ".fam")
+
+  # =====================================================================
+  # MANDATORY: kinship / duplicate detection
+  # =====================================================================
 
   # Step 1: bin HM3 SNPs into N LD-block-merged regions
   call MakeRegionSnplists {
@@ -110,16 +183,123 @@ workflow exome_duplicates {
       aliases    = aliases
   }
 
+  # =====================================================================
+  # OPTIONAL: subset + rename to FinnGen IDs
+  # =====================================================================
+  if (run_rename) {
+    scatter (chrom in chroms) {
+      call QueryChromPositions {
+        input:
+          chrom     = chrom,
+          vcf_pairs = vcf_pairs
+      }
+    }
+
+    call BuildAllRegions {
+      input:
+        position_files = flatten(QueryChromPositions.positions),
+        vcf_pairs      = vcf_pairs,
+        chroms         = chroms,
+        chunk_mb       = chunk_mb
+    }
+
+    scatter (i in range(length(BuildAllRegions.tasks))) {
+      call SubsetChunk {
+        input:
+          vcf              = BuildAllRegions.tasks[i][0],
+          prefix           = BuildAllRegions.tasks[i][1],
+          region           = BuildAllRegions.tasks[i][2],
+          resolved_mapping = GatherResults.id_mapping,
+          chunk_mb         = chunk_mb
+      }
+    }
+
+    Int n_gather = length(vcf_pairs) * length(chroms)
+
+    scatter (i in range(n_gather)) {
+      Int ds_idx = i / length(chroms)
+      Int ch_idx = i % length(chroms)
+      call ConcatChromVCF {
+        input:
+          all_vcf_paths = SubsetChunk.out_vcf,
+          dataset       = vcf_pairs[ds_idx][0],
+          vcf           = vcf_pairs[ds_idx][1],
+          chrom         = chroms[ch_idx],
+          suffix        = suffix,
+          chrom_size_mb = BuildAllRegions.chrom_sizes_mb[i]
+      }
+
+      # ---- HWE (autosomes only): chained directly off ConcatChromVCF's own
+      #      output — same renamed VCF, no separate source. disk_gb uses the
+      #      exact size of this specific file (a real task output, sized at
+      #      workflow level so it's never passed into a task as File — see
+      #      exome_hwe.wdl for why that matters on this Cromwell backend). ----
+      Boolean is_autosome = chroms[ch_idx] != "chrX" && chroms[ch_idx] != "chrY"
+
+      if (is_autosome) {
+        Int hwe_disk_gb = ceil(size(ConcatChromVCF.out_vcf, "GB") * 3)
+
+        call VcfToPlink {
+          input:
+            vcf_template    = ConcatChromVCF.out_vcf,   # File coerced to String — no localization
+            plink_conv_args = hwe_plink_conv_args,
+            mem_gb          = hwe_mem_gb,
+            cpu             = hwe_cpu,
+            disk_gb         = hwe_disk_gb
+        }
+
+        call Hardy {
+          input:
+            bed        = VcfToPlink.bed,
+            out_prefix = vcf_pairs[ds_idx][0] + "_" + chroms[ch_idx]
+        }
+      }
+    }
+
+    Array[File] all_hwe_files = select_all(Hardy.hardy)
+    Array[File] all_hwe_beds  = select_all(VcfToPlink.bed)
+    Array[File] all_hwe_bims  = select_all(VcfToPlink.bim)
+    Array[File] all_hwe_fams  = select_all(VcfToPlink.fam)
+
+    # ---- per-dataset HWE gather, long-name output (same derivation as
+    #      exome_hwe.wdl — every VCF here follows "{LongName}.QC_ANNOTATED...") ----
+    scatter (hwe_ds_i in range(length(vcf_pairs))) {
+      String hwe_long_name = sub(basename(vcf_pairs[hwe_ds_i][1], ".vcf.gz"), "\\.QC_ANNOTATED$", "")
+
+      call GatherHardy {
+        input:
+          dataset         = vcf_pairs[hwe_ds_i][0],
+          out_name        = hwe_long_name,
+          all_hardy_files = all_hwe_files
+      }
+    }
+  }
+
   output {
+    # ---- mandatory: kinship / ID resolution — always produced ----
     File combined_summary     = GatherResults.combined_summary
     File combined_plot        = GatherResults.combined_plot
     File id_mapping           = GatherResults.id_mapping
     File id_mapping_stats     = GatherResults.id_mapping_stats
     File id_mapping_md        = GatherResults.id_mapping_md
     File id_mapping_flowchart = GatherResults.id_mapping_flowchart
+
+    # ---- optional: rename stage — only present when run_rename = true ----
+    Array[File]? chrom_vcfs = ConcatChromVCF.out_vcf
+    Array[File]? chrom_tbis = ConcatChromVCF.out_tbi
+
+    # ---- optional: HWE stage — only present when run_rename = true ----
+    Array[File]? dataset_hwe_summaries = GatherHardy.out_tsv
+    Array[File]? hwe_beds              = all_hwe_beds
+    Array[File]? hwe_bims              = all_hwe_bims
+    Array[File]? hwe_fams              = all_hwe_fams
   }
 }
 
+
+# =========================================================================
+# TASKS — kinship / duplicate detection (formerly exome_duplicates.wdl)
+# =========================================================================
 
 # -----------------------------------------------------------------------
 # Step 1: Bin HM3 SNPs into Berisa LD blocks, greedily merge to N regions
@@ -734,12 +914,406 @@ task GatherResults {
     File id_mapping_flowchart = out_prefix + "_id_mapping_flowchart.png"
   }
 
-  meta {
-    volatile: true
-  }
-
   runtime {
     docker: docker
     disks:  "local-disk 20 HDD"
+  }
+}
+
+
+# =========================================================================
+# TASKS — subset + rename to FinnGen IDs (formerly exome_rename.wdl)
+# =========================================================================
+
+# -----------------------------------------------------------------------
+# Query CHROM+POS for all datasets for one chrom in parallel (cached).
+# Output: one {dataset}_{chrom}_pos.txt per dataset.
+# -----------------------------------------------------------------------
+task QueryChromPositions {
+  input {
+    String               chrom
+    Array[Array[String]] vcf_pairs
+    Int                  cpu     = 4
+    Int                  disk_gb = 10
+  }
+
+  command <<<
+  set -euo pipefail
+
+  while IFS=$'\t' read -r dataset vcf; do
+    echo "export GCS_OAUTH_TOKEN=\$(gcloud auth application-default print-access-token) && bcftools query -f '%POS\n' --regions ~{chrom} \"$vcf\" > ${dataset}_~{chrom}_pos.txt"
+  done < ~{write_tsv(vcf_pairs)} > query_commands.sh
+
+  parallel -j ~{cpu} < query_commands.sh
+
+  for f in *_~{chrom}_pos.txt; do
+    echo "~{chrom} $(basename $f _~{chrom}_pos.txt): $(wc -l < $f) positions" >&2
+  done
+  >>>
+
+  output {
+    Array[File] positions = glob("*_~{chrom}_pos.txt")
+  }
+
+  runtime {
+    cpu:   cpu
+    disks: "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# Build size-based chunk regions for all datasets × chroms.
+# Queries file stats (fast — index only), then loops over position files.
+# Output: Array[Array[String]] tasks with columns vcf | prefix | region
+# prefix = DATASET_CHUNKIDX e.g. botnia_001
+# -----------------------------------------------------------------------
+task BuildAllRegions {
+  input {
+    Array[File]          position_files
+    Array[Array[String]] vcf_pairs
+    Array[String]        chroms
+    Int                  chunk_mb
+  }
+
+  command <<<
+  set -euo pipefail
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+
+  # Link position files by name
+  while read -r f; do
+    ln -s "$f" "$(basename $f)"
+  done < ~{write_lines(position_files)}
+
+  # Get file size + total variants per dataset
+  while IFS=$'\t' read -r dataset vcf; do
+    file_bytes=$(gsutil du "$vcf" | awk '{print $1}')
+    n_total=$(bcftools index --stats "$vcf" | awk '{sum+=$3} END{print sum}')
+    bpv=$(awk -v fb="$file_bytes" -v nt="$n_total" 'BEGIN{printf "%.2f", fb/nt}')
+    echo "$dataset $vcf $bpv" >> dataset_stats.txt
+    echo "$dataset: $(( file_bytes/1024/1024 ))MB  total_variants=$n_total  bpv=$bpv" >&2
+  done < ~{write_tsv(vcf_pairs)}
+
+  # Build regions per dataset × chrom; also emit chrom_sizes_mb in scatter order
+  while read -r dataset vcf bpv; do
+    while read -r chrom; do
+      pos_file="${dataset}_${chrom}_pos.txt"
+      if [[ ! -f "$pos_file" || ! -s "$pos_file" ]]; then
+        echo "0" >> chrom_sizes_mb.txt
+        continue
+      fi
+
+      n_chrom=$(wc -l < "$pos_file")
+      chrom_mb=$(awk -v bpv="$bpv" -v nc="$n_chrom" 'BEGIN{printf "%.0f", bpv*nc/1024/1024}')
+      echo "$chrom_mb" >> chrom_sizes_mb.txt
+
+      n_variants=$(awk -v bpv="$bpv" -v mb="~{chunk_mb}" 'BEGIN{n=int(mb*1024*1024/bpv); print (n<1?1:n)}')
+      last_pos=$(tail -n1 "$pos_file")
+
+      { cat "$pos_file"; echo "$last_pos"; } | split -l "$n_variants" - "split_${dataset}_${chrom}_"
+
+      chunk=0
+      start=1
+      for f in $(ls split_${dataset}_${chrom}_* | sort); do
+        end=$(tail -n1 "$f")
+        printf "%s\t%s_%s_%03d\t%s:%d-%d\n" "$vcf" "$dataset" "$chrom" "$chunk" "$chrom" "$start" "$end"
+        start=$((end + 1))
+        chunk=$((chunk + 1))
+      done
+      rm split_${dataset}_${chrom}_*
+    done < ~{write_lines(chroms)}
+  done < dataset_stats.txt > tasks.tsv
+
+  echo "Total scatter tasks: $(wc -l < tasks.tsv)" >&2
+  >>>
+
+  output {
+    Array[Array[String]] tasks          = read_tsv("tasks.tsv")
+    Array[Int]           chrom_sizes_mb = read_lines("chrom_sizes_mb.txt")
+  }
+
+  runtime {
+    disks: "local-disk 20 HDD"
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# Stream one region, subset + rename samples.
+# prefix = DATASET_CHROM_CHUNKIDX → dataset derived by stripping the
+# trailing _chrN_NNN suffix, NOT by cutting at the first '_': dataset
+# tokens like "BGE_scz_bp_ctrl" and "gnomad_wes_finns" contain underscores
+# themselves, so cutting at the first '_' truncates them (e.g. to just
+# "BGE"), which then matches nothing in resolved_mapping's DATASET column
+# and silently produces an empty sample list ("subsetting has removed all
+# samples" / "missing FORMAT fields" from bcftools).
+# -----------------------------------------------------------------------
+task SubsetChunk {
+  input {
+    String vcf
+    String prefix
+    String region
+    File   resolved_mapping
+    Int    chunk_mb
+    Int    cpu     = 4
+    Int    disk_gb = chunk_mb * 3 / 1024 + 5
+  }
+
+  String dataset = sub(prefix, "_chr[0-9XY]+_[0-9]+$", "")
+  String out     = prefix + ".vcf.gz"
+
+  command <<<
+  set -euo pipefail
+
+  # Filter resolved_mapping to this dataset
+  awk -v ds="~{dataset}" '
+    NR==1{next}
+    $3==ds && $2!="NA" && $2!="AMBIGUOUS" && $2!="" {print $1"\t"$2}
+  ' ~{resolved_mapping} > mapping.tsv
+
+  export HTS_HTTP_VERSION=1.1
+  cut -f1 mapping.tsv > sample_list.txt
+
+  success=0
+  for attempt in 1 2 3; do
+    export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+    rm -f subset.vcf.gz
+    if bcftools view -r "~{region}" -t "~{region}" --samples-file sample_list.txt --force-samples --threads ~{cpu} -Oz -o subset.vcf.gz "~{vcf}"; then
+      success=1
+      break
+    fi
+    echo "Attempt $attempt failed for ~{region}" >&2
+    [[ $attempt -lt 3 ]] && sleep 15
+  done
+  [[ $success -eq 1 ]] || { echo "All 3 attempts failed for ~{region}" >&2; exit 1; }
+
+  # Reheader locally — no GCS, no token risk
+  bcftools reheader --samples mapping.tsv --output "~{out}" subset.vcf.gz
+  rm subset.vcf.gz
+
+  echo "DONE ~{out} samples=$(bcftools query -l ~{out} | wc -l)"
+  >>>
+
+  output {
+    File out_vcf = out
+  }
+
+  runtime {
+    cpu:   cpu
+    disks: "local-disk ~{disk_gb} HDD"
+  }
+}
+
+
+# -----------------------------------------------------------------------
+# Concat all chunks for one dataset+chrom into a single VCF.
+# Receives all chunk paths as strings (no localization), greps to select
+# matching chunks, sorts by chunk index, concatenates.
+# -----------------------------------------------------------------------
+task ConcatChromVCF {
+  input {
+    Array[String] all_vcf_paths
+    String        dataset
+    String        vcf
+    String        chrom
+    String        suffix
+    Int           chrom_size_mb
+    Int           cpu     = 16
+    Int           disk_gb = chrom_size_mb * 2 / 1024 + 10
+  }
+
+  String base = sub(basename(vcf, ".vcf.gz"), "\\.QC_ANNOTATED$", "")
+  String out  = base + ".QC_ANNOTATED_" + suffix + "_" + chrom + ".vcf.gz"
+
+  command <<<
+  set -euo pipefail
+
+  grep "~{dataset}_~{chrom}_" ~{write_lines(all_vcf_paths)} | \
+    awk -F/ '{print $NF "\t" $0}' | sort -k1,1 | cut -f2- > chunks.txt
+  echo "~{dataset} ~{chrom}: $(wc -l < chunks.txt) chunks" >&2
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+  bcftools concat \
+    --file-list chunks.txt \
+    --output-type z \
+    --threads ~{cpu} \
+    --output ~{out}
+
+  bcftools index -t --threads ~{cpu} ~{out}
+  echo "DONE ~{out} variants=$(bcftools index -n ~{out})" >&2
+  >>>
+
+  output {
+    File out_vcf = out
+    File out_tbi = out + ".tbi"
+  }
+
+  runtime {
+    cpu:   cpu
+    disks: "local-disk ~{disk_gb} HDD"
+  }
+}
+
+# =========================================================================
+# TASKS — HWE (autosomal Hardy-Weinberg summary, per dataset)
+# Inlined from exome_hwe.wdl (kept as a standalone WDL for isolated testing —
+# see that file's header for the full design rationale). No imports in this
+# file by design, so these are duplicated here rather than shared.
+# =========================================================================
+
+# ── VcfToPlink — VCF (GCS FUSE) → plink bed/bim/fam. vcf_template and
+#    disk_gb are both plain String/Int — no File-typed value anywhere in this
+#    task's scope (input or private declaration). On this Cromwell setup
+#    (GCP Batch backend), any File-typed value used inside a task gets fully
+#    localized regardless of localization_optional or whether it's a formal
+#    input vs. a private declaration, which would defeat the FUSE trick
+#    entirely. disk_gb is computed once at the workflow level instead (see
+#    hwe_disk_gb above), where a File coercion never reaches any task's
+#    localization manifest. ────────────────────────────────────────────────
+task VcfToPlink {
+  input {
+    String vcf_template     # gs://… fully resolved
+    String plink_conv_args
+    Int    mem_gb
+    Int    cpu
+    Int    disk_gb
+    String docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:hwe"
+  }
+
+  String out_prefix    = basename(vcf_template, ".vcf.gz")   # same name as the VCF, for co-located release
+  Int    plink_mem_mb  = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
+
+  command <<<
+  set -euo pipefail
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+
+  resolve_fuse() {
+    local fuse
+    fuse=$(echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1" >&2; exit 1; }
+    echo "$fuse"
+  }
+  fuse_path=$(resolve_fuse "~{vcf_template}")
+
+  plink2 \
+    --vcf        "$fuse_path" \
+    --make-bed \
+    --memory     ~{plink_mem_mb} \
+    --threads    ~{cpu} \
+    --out        "~{out_prefix}" \
+    ~{plink_conv_args}
+  >>>
+
+  output {
+    File bed = out_prefix + ".bed"
+    File bim = out_prefix + ".bim"
+    File fam = out_prefix + ".fam"
+    File log = out_prefix + ".log"
+  }
+  runtime {
+    cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+    docker: docker
+  }
+}
+
+# ── Hardy — plink2 --hardy on a plink fileset (FUSE-read, bim/fam derived
+#    from bed's own prefix). ALT_FREQS/OBS_CT are computed by plain
+#    arithmetic on --hardy's own gcounts, not a separate --freq run: plink2
+#    never reorders A1/AX by frequency (unlike plink 1.9), so A1 is REF and
+#    AX is ALT here, and with N = HOM_A1_CT + HET_A1_CT + TWO_AX_CT:
+#      OBS_CT    = 2*N
+#      ALT_FREQS = (2*TWO_AX_CT + HET_A1_CT) / OBS_CT
+#    This also sidesteps a real edge case a --freq join would hit: for a
+#    surviving multiallelic site, --hardy emits one row per biallelic
+#    contrast while --freq's ALT_FREQS is a single comma-joined value per
+#    variant — the two wouldn't line up row-for-row. ─────────────────────────
+task Hardy {
+  input {
+    String bed              # gs://… VcfToPlink.bed — read via FUSE, not localized. bim/fam are
+                             # always same-prefix siblings from the same VcfToPlink call, so
+                             # they're derived below rather than passed as separate inputs.
+    String out_prefix
+    String docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:hwe"
+  }
+
+  command <<<
+  set -euo pipefail
+
+  resolve_fuse() {
+    local fuse
+    fuse=$(echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1" >&2; exit 1; }
+    echo "$fuse"
+  }
+  bed_path=$(resolve_fuse "~{bed}")
+  bfile_prefix="${bed_path%.bed}"
+
+  plink2 \
+    --bfile "$bfile_prefix" \
+    --hardy \
+    --out "~{out_prefix}"
+
+  awk -F'\t' '
+    NR==1 {
+      for (i=1; i<=NF; i++) {
+        if ($i=="HOM_A1_CT") hom=i
+        if ($i=="HET_A1_CT") het=i
+        if ($i=="TWO_AX_CT") twoax=i
+      }
+      print $0"\tALT_FREQS\tOBS_CT"
+      next
+    }
+    {
+      n   = $hom + $het + $twoax
+      obs = 2*n
+      f   = (obs > 0) ? (2*$twoax + $het) / obs : "NA"
+      print $0"\t"f"\t"obs
+    }
+  ' "~{out_prefix}.hardy" > "~{out_prefix}.hwe.tsv"
+  gzip -f "~{out_prefix}.hwe.tsv"
+  >>>
+
+  output {
+    File hardy = out_prefix + ".hwe.tsv.gz"
+    File log   = out_prefix + ".log"
+  }
+  runtime {
+    docker: docker
+  }
+}
+
+# ── GatherHardy — filters the full flat all_hardy_files array down to one
+#    dataset's per-chrom .hardy files by filename match (out_prefix embeds
+#    "dataset_chrom"), then concatenates them into a single gzipped summary
+#    TSV. dataset (the short token) is only used for the filename-match
+#    filter; out_name (the long descriptive name) names the final output. ───
+task GatherHardy {
+  input {
+    String      dataset
+    String      out_name
+    Array[File] all_hardy_files   # every (dataset, chrom) Hardy output — filtered below
+  }
+
+  command <<<
+  set -euo pipefail
+  grep "/~{dataset}_chr" "~{write_lines(all_hardy_files)}" > my_files.txt
+
+  out="~{out_name}.hwe_summary.tsv"
+  wrote_header=0
+  while read -r f; do
+    if [[ "$wrote_header" -eq 0 ]]; then
+      # process substitution, not a direct pipe: head's early exit would
+      # otherwise SIGPIPE zcat and (under pipefail) kill the script with 141
+      head -1 <(zcat "$f") > "$out"
+      wrote_header=1
+    fi
+    zcat "$f" | tail -n +2 >> "$out"
+  done < my_files.txt
+  gzip -f "$out"
+  >>>
+
+  output {
+    File out_tsv = "~{out_name}.hwe_summary.tsv.gz"
   }
 }

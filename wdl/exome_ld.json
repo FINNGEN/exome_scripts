@@ -1,7 +1,11 @@
 {
     "exome_ld.fg_vcf_template": "gs://fg-cromwell-4/fuse_test/finngen_vcf/finngen_R14_chrCHROM.vcf.gz",
     "exome_ld.fg_pheno_file": "gs://finngen-production-library-red/finngen_R14/phenotype_1.0/data/finngen_R14_minimum_1.0.txt.gz",
-    "exome_ld.exome_vcf_pairs": [ ["ADPKD",   "gs://fg-cromwell-4/fuse_test/vcf/likely_pathogenic_annot_annotated_full_header_fix_resampled.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"], ["BOTNIA",  "gs://fg-cromwell-4/fuse_test/vcf/THLBB2023_14_WES_Botnia.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],["DALY",    "gs://fg-cromwell-4/fuse_test/vcf/fimm-daly_finnish_gvs_bge_callset_1_padded_split_FINBBonly.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"], ["WES", "gs://fg-cromwell-4/fuse_test/vcf/finngen_wes_gnomad_v4.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"]
+    "exome_ld.exome_vcf_pairs": [
+        ["botnia",           "gs://fg-cromwell-4/fuse_test/vcf/Botnia_THL_diabetes_study.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],
+        ["ADPKD",            "gs://fg-cromwell-4/fuse_test/vcf/Autosomal_dominant_polycystic_kidney_disease_WES_ADPKD.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],
+        ["BGE_scz_bp_ctrl",  "gs://fg-cromwell-4/fuse_test/vcf/Blended_Genome_Exome_scizophrenia_bipolar_controls.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"],
+        ["gnomad_wes_finns", "gs://fg-cromwell-4/fuse_test/vcf/gnomAD_v4_Finns_subset.QC_ANNOTATED_fg_ids_chrCHROM.vcf.gz"]
     ],
     "exome_ld.positions_bim": "gs://finngen-production-library-red/finngen_R14/plink_1.0/data/finngen_R14.bim",
     "exome_ld.annot": "gs://fg-3/exome_v2/data/annotate/exome_sites_only_annotated_annot.tsv.bgz",

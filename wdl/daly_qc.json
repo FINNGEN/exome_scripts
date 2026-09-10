@@ -1,8 +1,0 @@
-{
-    "daly_qc.vcf_list": "gs://fg-3/exome_v2/inputs/daly_qc_files.txt",
-    "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
-    "daly_qc.rename_file":"gs://fg-3/exome_v2/inputs/daly_rename.txt",
-    "daly_qc.denials": "gs://thl-incoming-data/from_THL_registerteam/denial_lists/finngen_R14_finngenid_exclusion_list.txt",
-    "daly_qc.aliases": "gs://fg-3/exome_v2/inputs/finngen_R14_duplicate_list.txt"
-}
-

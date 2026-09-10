@@ -1,6 +1,49 @@
 # EXOME data processing
 
-Scripts and WDL workflows for QC-filtering and sample-matching multiple exome cohorts (BOTNIA, ADPKD, DALY, WES) against the FinnGen R14 reference panel. The primary goal is to identify which exome samples correspond to FinnGen participants, enabling downstream data integration. Sample matching uses KING --duplicate on a curated set of ~10,000 HM3 SNPs. Variant QC and genotype filtering are handled by a set of bcftools-based WDL workflows.
+Scripts and WDL workflows for QC-filtering and sample-matching multiple exome cohorts (`botnia`, `ADPKD`, `BGE_scz_bp_ctrl`, `gnomad_wes_finns`) against the FinnGen R14 reference panel. The primary goal is to identify which exome samples correspond to FinnGen participants, enabling downstream data integration. Sample matching uses KING --duplicate on a curated set of ~10,000 HM3 SNPs. Variant QC and genotype filtering are handled by a set of bcftools-based WDL workflows.
+
+---
+
+## Running the full pipeline
+
+End-to-end rerun, in order. Each stage below links to its full documentation further down this README.
+
+### 1. QC filtering (per dataset)
+
+Run all three QC workflows — each dataset is independent, so these three can run in parallel:
+
+| Dataset(s) | Workflow | Inputs |
+|---|---|---|
+| `BGE_scz_bp_ctrl` | `wdl/bge.wdl` | `wdl/bge.json` |
+| `gnomad_wes_finns` | `wdl/gnomad_wes_finns.wdl` | `wdl/gnomad_wes_finns.json` |
+| `botnia` + `ADPKD` | `wdl/single_file_qc.wdl` | `wdl/single_file_qc.json` |
+
+⚠️ **`bge.wdl` and `gnomad_wes_finns.wdl` read their input VCFs via GCS FUSE**, not through Cromwell's normal file localization — their `vcf_list` entries are `String` paths, read in-task via `sed 's|gs://[^/]*/|/mnt/disks/gcs/|'` rather than declared as `File`. Two consequences before you (re)submit:
+- **The VCF must already be correct and up to date at its `gs://` path.** There's no localization step where a stale file would get refreshed or where you'd notice a mismatch.
+- **Call-caching hashes the path string, not the file's content.** If you overwrite a VCF in place at the same path, a resubmitted workflow can silently **call-cache-hit and reuse the old (pre-update) result** instead of detecting that the content changed. If you've updated a source VCF in place, either give it a new path/filename or disable call caching for that submission.
+
+`single_file_qc.wdl` outputs stay per-chromosome (no merge step). `bge.wdl` and `gnomad_wes_finns.wdl` each produce one merged `{root_name}.QC_ANNOTATED.vcf.gz` per dataset (see the `root_name` input added to each — [gnomad_wes_finns.wdl](#gnomad_wes_finnswdl), [bge.wdl](#bgewdl)).
+
+### 2. Sample matching — kinship, with optional rename
+
+Run `wdl/exome_reassign_ids.wdl` (`wdl/exome_reassign_ids.json`) — see [exome_reassign_ids.wdl](#exome_reassign_idswdl).
+
+1. Submit with `run_rename: false`. Inspect `id_mapping` / `id_mapping_stats` / `id_mapping_flowchart` before trusting the mapping.
+2. Once satisfied, either resubmit the same workflow with `run_rename: true` to also subset+rename the per-chromosome VCFs, or skip this for now and come back to it later — it's optional at this point. Resubmitting only reruns the newly-enabled rename stage; Cromwell call-caches the untouched kinship calls.
+
+### 3. LD, pass 1 — merge + raw LD
+
+Run `wdl/exome_ld.wdl` (`wdl/exome_ld.json`) — see [LD step](#ld-step). This merges FG array + all four exome cohorts per chromosome and produces `merged_vcf[]` (the per-chromosome merged VCFs, exported from the merged plink data) alongside `ld_results[]`. `merged_vcf[]` is what gets annotated with VEP next.
+
+⚠️ **`annot` is a required `File` input with no default** (`wdl/exome_ld.wdl:30`) — it can't be omitted, and `FilterLd` unconditionally reads `rsid` / `most_severe` / `gene_most_severe` columns from it with no fallback path. For a first pass with no real annotation yet, point `annot` at a placeholder TSV containing just that header row with zero data rows — see [VEP annotation](#vep-annotation) below for the full two-pass flow.
+
+### 4. VEP annotation
+
+Annotate `merged_vcf[]` with `run_vep_annotate.sh` from FinnGen commons, then build the `.pkl` cache with `flag_ld_coding.py` and upload it to GCS — see [VEP annotation](#vep-annotation) for the exact commands.
+
+### 5. LD, pass 2 — rerun with real annotation
+
+Resubmit `wdl/exome_ld.wdl` with `exome_ld.annot` now pointing at the VEP annotation TSV produced in step 4 (no intermediate caching/pickle step — `FilterLd` reads that TSV directly). Cromwell call-caches the merge/plink stages since only `annot` changed; the final `ld_results[]` include real `exome_consequence`/`EXOME_AF`/`exome_nearest_gene` values instead of `NA`, and `annotated_ld`/`raw_ld` are the release files.
 
 ---
 
@@ -39,11 +82,22 @@ Scripts and WDL workflows for QC-filtering and sample-matching multiple exome co
 
 ## SAMPLE MATCHING
 
-Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship (`exome_duplicates.wdl`), followed by post-processing with `scripts/resolve_mapping.py` to produce a clean final mapping.
+Sample matching identifies which exome samples correspond to samples in the FinnGen plink reference panel using KING kinship, followed by post-processing to produce a clean final mapping. Matched samples can then be subset and renamed to FinnGen IDs. Both stages live in a single self-contained file, `wdl/exome_reassign_ids.wdl` — no imports, no sub-workflows.
 
-### exome_duplicates.wdl
+### exome_reassign_ids.wdl
+
+**One file, two stages, gated by a `run_rename` boolean:**
+
+1. **Kinship / duplicate detection (mandatory, always runs)** — KING-based matching between exome VCFs and the FinnGen plink reference, followed by `resolve_mapping.py`-style post-processing to produce the final QRY→REF mapping.
+2. **Subset + rename to FinnGen IDs (optional, `if (run_rename)`)** — fed `resolved_mapping` directly from stage 1's own `id_mapping` output within the same workflow scope, no file hand-off between separate submissions.
+
+Submit with `run_rename: false` first to compute and inspect the ID mapping (`id_mapping` / `id_mapping_stats` / `id_mapping_flowchart`) without paying the cost of the rename stage. Once the mapping looks right, resubmit the same workflow with only `run_rename` flipped to `true` — Cromwell call-caches every call from stage 1 (their inputs haven't changed), so only the newly-enabled stage 2 actually runs. See `wdl/exome_reassign_ids.json` for a full input example. Both stages are documented in detail below.
+
+### Stage 1 — kinship / duplicate detection (mandatory)
 
 KING-based duplicate detection between exome VCFs and the FinnGen plink reference. Preferred over gtcheck when sample counts are large — KING scales better and gives a cleaner kinship coefficient rather than a discordance rate.
+
+> Inlined directly in `wdl/exome_reassign_ids.wdl` (no separate file, no import) — always runs regardless of `run_rename`.
 
 **How the workflow works:**
 
@@ -99,18 +153,18 @@ MakeRegionSnplists
 
 10. **GatherResults** *(always runs, even if some datasets fail)*: Collects all per-dataset summaries, adds a `DATASET` column (query prefix only), and concatenates into an intermediate `{out_prefix}_combined_summary.tsv`. Stacks concordance PNGs into `{out_prefix}_concordance.png`. Then runs the resolve_mapping logic — with optional alias file for twin disambiguation — to produce `{out_prefix}_id_mapping.tsv`, `_id_mapping_stats.tsv`, `_id_mapping_stats.md`, and `_id_mapping_flowchart.png`.
 
-**Inputs:**
+**Inputs** (set via `exome_reassign_ids.*` — see `wdl/exome_reassign_ids.json`):
 
 ```json
 {
-  "exome_duplicates.vcf_pairs":   [["ADPKD", "gs://bucket/adpkd.vcf.gz"]],
-  "exome_duplicates.plink_bed":   "gs://bucket/finngen_R14_hm3.bed",
-  "exome_duplicates.out_prefix":  "finngen_R14_exome",
-  "exome_duplicates.aliases":     "gs://bucket/finngen_R14_duplicate_list.txt",
-  "exome_duplicates.n_regions":   100,
-  "exome_duplicates.target_snps": 10000,
-  "exome_duplicates.max_het_F":   0.3,
-  "exome_duplicates.chunk_size":  10000
+  "exome_reassign_ids.vcf_pairs":   [["ADPKD", "gs://bucket/adpkd.vcf.gz"], ["botnia", "gs://bucket/botnia.vcf.gz"], ...],
+  "exome_reassign_ids.plink_bed":   "gs://bucket/finngen_R14_hm3.bed",
+  "exome_reassign_ids.out_prefix":  "finngen_R14_exome",
+  "exome_reassign_ids.aliases":     "gs://bucket/finngen_R14_duplicate_list.txt",
+  "exome_reassign_ids.n_regions":   100,
+  "exome_reassign_ids.target_snps": 10000,
+  "exome_reassign_ids.max_het_F":   0.3,
+  "exome_reassign_ids.chunk_size":  10000
 }
 ```
 
@@ -255,9 +309,11 @@ The tables below show the built-in input, alias groups, resolved mapping, and ch
 
 ---
 
-### exome_rename.wdl
+### Stage 2 — subset + rename to FinnGen IDs (optional)
 
-**Sample subsetting and renaming using the QRY→REF mapping from `exome_duplicates.wdl`**
+**Sample subsetting and renaming using the QRY→REF mapping from stage 1**
+
+> Inlined directly in `wdl/exome_reassign_ids.wdl` (no separate file, no import) — gated by `if (run_rename)`, fed `resolved_mapping` directly from stage 1's own `id_mapping` output within the same workflow scope. No manual hand-off of the mapping file, and no separate submission.
 
 **What it does:**
 
@@ -277,18 +333,18 @@ ConcatChromVCF[D×C]      scatter — selects matching chunks and concatenates
                          into one VCF per dataset + chrom
 ```
 
-**Inputs:**
+**Inputs** (set via `exome_reassign_ids.*` — see `wdl/exome_reassign_ids.json`):
 
 ```json
 {
-  "exome_rename.resolved_mapping": "gs://bucket/FG_EXOME_resolved.tsv",
-  "exome_rename.vcf_pairs":        [["BOTNIA", "gs://bucket/BOTNIA.QC_ANNOTATED.vcf.gz"], ...],
-  "exome_rename.chunk_mb":         500,
-  "exome_rename.suffix":           "fg_ids"
+  "exome_reassign_ids.run_rename": true,
+  "exome_reassign_ids.vcf_pairs":  [["botnia", "gs://bucket/Botnia_THL_diabetes_study.QC_ANNOTATED.vcf.gz"], ...],
+  "exome_reassign_ids.chunk_mb":   500,
+  "exome_reassign_ids.suffix":     "fg_ids"
 }
 ```
 
-`resolved_mapping` is the `_resolved.tsv` output from `exome_duplicates.wdl` — only rows with a non-NA, non-AMBIGUOUS `REF_MAPPED` are used. `vcf_pairs` defaults to the four project datasets if omitted.
+`resolved_mapping` is not a settable input — it's wired internally from stage 1's `id_mapping` output, only rows with a non-NA, non-AMBIGUOUS `REF_MAPPED` are used. `vcf_pairs` is shared with stage 1 (same pairs feed both).
 
 **Outputs:**
 
@@ -413,11 +469,11 @@ GatherAnnotatedLd   [after scatter]
 
 ### VEP annotation
 
-To add coding status flags to the LD output, VEP annotations must be generated from the merged VCFs produced by `exome_ld.wdl`. The recommended approach is a two-pass run:
+`exome_ld.annot` is a required `File` input (`wdl/exome_ld.wdl:30`, no default) that `FilterLd` reads directly as a TSV with `pl.read_csv(..., columns=['rsid','most_severe','gene_most_severe'])` (`wdl/exome_ld.wdl:604`) — there's no pickle/cache step in the current code, despite older wording that used to describe one (`flag_ld_coding.py`, a `.pkl` cache, `is_fg_coding`/`is_ex_coding` columns — none of that exists in this repo; if you're looking for it, it was either never built or removed). The real two-pass flow:
 
-**Pass 1 — run without annotation:**
+**Pass 1 — placeholder annotation:**
 
-Run `exome_ld.wdl` without the `annot` input. The workflow produces `merged_vcf[]` outputs (one per chromosome) alongside the unannotated `ld_results[]`.
+`annot` can't actually be omitted (no `?`, no default), so pass a placeholder TSV containing just the header row `rsid\tmost_severe\tgene_most_severe` and zero data rows. `FilterLd` will then report `exome_consequence`/`EXOME_AF` as `NA` for everything, which is the correct "unannotated" result. The workflow produces `merged_vcf[]` outputs (one per chromosome, from `PlinkToVcf`) alongside this unannotated `ld_results[]`.
 
 **Annotate the VCFs:**
 
@@ -436,15 +492,15 @@ Then run the script:
 bash commons/variant_annotation/scripts/run_vep_annotate.sh
 ```
 
-This produces a VEP annotation TSV (or pickle) containing variant IDs and `most_severe` consequence columns consumed by `flag_ld_coding.py`.
+This produces a VEP annotation TSV containing `rsid`, `most_severe`, and `gene_most_severe` columns — the exact columns `FilterLd` reads.
 
-**Pass 2 — re-run with annotation:**
+**Pass 2 — re-run with the real annotation:**
 
-Before re-submitting the WDL, run `flag_ld_coding.py` locally once on any single-chromosome `.vcor` file with the annotation TSV. This generates the `.pkl` cache (see the standalone usage in the `flag_ld_coding.py` section above). Upload the `.pkl` to GCS, then re-submit `exome_ld.wdl` pointing `annot` at it. The `FilterLd` task loads the `.pkl` directly and the final `ld_results[]` files will include the `is_fg_coding` / `is_ex_coding` columns.
+Re-submit `exome_ld.wdl` with `annot` pointing directly at that TSV (`.bgz`-compressed is fine — `pl.read_csv` handles it). No intermediate caching step needed. `FilterLd` reads it directly and the final `ld_results[]`/`ld_annotated` files will have real `exome_consequence`/`EXOME_AF`/`exome_nearest_gene` values instead of `NA`.
 
 ```json
 {
-  "exome_ld.annot": "gs://bucket/exome_sites_only_annotated_annot.pkl"
+  "exome_ld.annot": "gs://bucket/exome_sites_only_annotated.tsv.bgz"
 }
 ```
 
@@ -456,7 +512,7 @@ This section summarizes the datasets and processing steps required to merge them
 
 ### Datasets
 
-#### Daly Data
+#### BGE_scz_bp_ctrl
 - **Samples**: 12,405 samples with non-FG IDs
 - **Status**: Merged into a single file by Lea
 - **Issues**: Required re-heading due to header formatting problems
@@ -476,7 +532,7 @@ This section summarizes the datasets and processing steps required to merge them
 | Indirect matches via mapping | 0 |
 | No match | 1 |
 
-#### BOTNIA
+#### botnia
 - **Samples**: 7,164 samples with FG IDs
 - **Status**: Single file, ready for processing
 - **QC Approach**: Contains AC, DP, and GQ fields for standard filtering
@@ -489,7 +545,7 @@ This section summarizes the datasets and processing steps required to merge them
 | No match | 110 |
 
 
-#### FINNGEN-WES
+#### gnomad_wes_finns
 25201 with FGID (Sometimes with "_dup") extension to indicate duplicate. In that case there are only 23223 unique IDs left
 
 - **Samples**:25201 with FGID (Sometimes with "_dup") extension to indicate duplicate. In that case there are only 23223 left
@@ -507,7 +563,7 @@ This section summarizes the datasets and processing steps required to merge them
 
 ### Sample exclusion (denials + aliases)
 
-All three QC workflows below (`wes_chrom.wdl`, `single_file_qc.wdl`, `daly_qc.wdl`) take two required inputs, `denials` and `aliases`, used to remove samples that must not appear in the QC'd output (e.g. a registry-mandated denial list).
+All three QC workflows below (`gnomad_wes_finns.wdl`, `single_file_qc.wdl`, `bge.wdl`) take two required inputs, `denials` and `aliases`, used to remove samples that must not appear in the QC'd output (e.g. a registry-mandated denial list).
 
 - `denials`: plain text file, one sample ID per line, to exclude.
 - `aliases`: tab-delimited file of alias groups, one group per line (same format used elsewhere in this repo — e.g. `resolve_mapping.py`'s duplicate/twin resolution) — groups of IDs that refer to the same participant.
@@ -520,9 +576,9 @@ Each workflow runs a shared `ExpandDenials` task once per workflow (not once per
 
 | Dataset | Original samples | Filtered samples | Removed |
 |---|---:|---:|---:|
-| DALY | 12,405 | 12,389 | 16 |
-| WES | 25,201 | 25,197 | 4 |
-| BOTNIA | 7,164 | 7,161 | 3 |
+| BGE_scz_bp_ctrl | 12,405 | 12,389 | 16 |
+| gnomad_wes_finns | 25,201 | 25,197 | 4 |
+| botnia | 7,164 | 7,161 | 3 |
 | ADPKD | 629 | 628 | 1 |
 | **Total** | **45,399** | **45,375** | **24** |
 
@@ -536,13 +592,13 @@ This repository contains WDL (Workflow Description Language) workflows for proce
 
 | Workflow | Purpose | Input Data Type |
 |----------|---------|-----------------|
-| `wes_chrom.wdl` | **Multi-chromosome parallel filtering** | Per-chromosome VCFs (exome or targeted sequencing) |
+| `gnomad_wes_finns.wdl` | **Multi-chromosome parallel filtering** | Per-chromosome VCFs (exome or targeted sequencing) |
 | `single_file_qc.wdl` | **Whole genome filtering** | Single whole-genome VCF files (splits by chromosome internally) |
-| `daly_qc.wdl` | **Simple filter-based QC** | Any VCF with FILTER flags to remove |
+| `bge.wdl` | **Simple filter-based QC** | Any VCF with FILTER flags to remove |
 
 ---
 
-#### wes_chrom.wdl
+#### gnomad_wes_finns.wdl
 
 **Parallel filtering workflow for per-chromosome WES data with position-based chunking**
 
@@ -574,6 +630,7 @@ This repository contains WDL (Workflow Description Language) workflows for proce
 ```json
 {
   "vcf_list": "path/to/vcf_list.txt",
+  "root_name": "gnomAD_v4_Finns_subset",
   "genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
   "variant_filter": "AC>0 & ALT!=\"*\"",
   "cpu_count": 16,
@@ -583,6 +640,8 @@ This repository contains WDL (Workflow Description Language) workflows for proce
   "test_sample_count": 10  // Optional: subset to first N samples for testing
 }
 ```
+
+`root_name` sets the output filename root (`{root_name}.QC_ANNOTATED.vcf.gz`) — it's an explicit input, not derived from the raw input VCF's name.
 
 Input file format (`vcf_list.txt`):
 ```
@@ -628,11 +687,11 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 4. Validates filtering worked correctly, including a sample-count check (original vs. filtered sample counts, per VCF) confirming the denial exclusion actually removed samples
 5. Outputs filtered VCF files
 
-**Key differences from wes_chrom.wdl:**
+**Key differences from gnomad_wes_finns.wdl:**
 
 - Processes **whole genome files** (not pre-split by chromosome)
 - Uses **chromosome-based parallelization** instead of position chunking
-- Works with both **chr-prefixed** (e.g. ADPKD) and **non-prefixed** (e.g. BOTNIA) VCFs — output is always chr-prefixed
+- Works with both **chr-prefixed** (e.g. ADPKD) and **non-prefixed** (e.g. botnia) VCFs — output is always chr-prefixed
 - No merging step (outputs remain per-chromosome)
 - Simpler workflow for whole genome data
 
@@ -640,7 +699,8 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 
 ```json
 {
-  "vcf_files": ["gs://bucket/whole_genome.vcf.gz"],
+  "vcf_files": ["gs://bucket/botnia.vcf.gz", "gs://bucket/adpkd.vcf.gz"],
+  "root_names": ["Botnia_THL_diabetes_study", "Autosomal_dominant_polycystic_kidney_disease_WES_ADPKD"],
   "genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
   "variant_filter": "AC>0 & ALT!=\"*\"",
   "cpu_count": 8,
@@ -651,6 +711,8 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 }
 ```
 
+`root_names` is an array the same length/order as `vcf_files` — each entry sets that VCF's output filename root (`{root_name}.QC_ANNOTATED.vcf.gz`), explicit rather than derived from the raw input VCF's name. This one workflow processes both `botnia` and `ADPKD` in a single scatter (they share the same filter logic), so a per-VCF root name is needed rather than one workflow-level value.
+
 **Outputs:**
 
 - `filtered_vcfs[]`: Filtered VCF per input file
@@ -659,26 +721,9 @@ Designed for **whole genome VCF files** where all chromosomes are in a single fi
 - `filtered_chrom_counts[]`: Variant counts per chromosome (after)
 - `validation_reports[]`: Validation reports, including original/filtered sample counts and samples removed by the denial list
 
-**How to run:**
-
-```bash
-cat > inputs.json << EOF
-{
-  "single_file_qc.vcf_files": ["gs://bucket/whole_genome.vcf.gz"],
-  "single_file_qc.genotype_filter": "FORMAT/DP<10 | FORMAT/GQ<20",
-  "single_file_qc.variant_filter": "AC>0 & ALT!=\\\"*\\\"",
-  "single_file_qc.cpu_count": 8,
-  "single_file_qc.denials": "path/to/denials.txt",
-  "single_file_qc.aliases": "path/to/aliases.txt"
-}
-EOF
-
-java -jar cromwell.jar run wdl/single_file_qc.wdl -i inputs.json
-```
-
 ---
 
-#### daly_qc.wdl
+#### bge.wdl
 
 **FILTER-based QC with header annotation and sample renaming**
 
@@ -695,25 +740,26 @@ For each input VCF (scatter over vcf_list):
 
 Then globally:
 
-7. **SummaryStats**: Per-chromosome variant counts + drop rates, plus original/filtered sample counts and samples removed by the denial list; derives output root name from input filenames.
+7. **SummaryStats**: Per-chromosome variant counts + drop rates, plus original/filtered sample counts and samples removed by the denial list; also guesses a root name from input filenames, but that guess is informational only (see `root_name` below).
 8. **SortAndMerge**: Concatenates per-chromosome filtered VCFs (in vcf_list order) into `{root_name}.QC_ANNOTATED.vcf.gz`.
 
 **Inputs:**
 
 ```json
 {
-  "daly_qc.vcf_list":         "path/to/vcf_list.txt",
-  "daly_qc.rename_file":      "path/to/rename.tsv",
-  "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
-  "daly_qc.cpu_count":        8,
-  "daly_qc.vcf_max_gb":       25,
-  "daly_qc.chunk_multiplier": 3,
-  "daly_qc.denials":          "path/to/denials.txt",
-  "daly_qc.aliases":          "path/to/aliases.txt"
+  "bge_qc.vcf_list":         "path/to/vcf_list.txt",
+  "bge_qc.root_name":        "Blended_Genome_Exome_scizophrenia_bipolar_controls",
+  "bge_qc.rename_file":      "path/to/rename.tsv",
+  "bge_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
+  "bge_qc.cpu_count":        8,
+  "bge_qc.vcf_max_gb":       25,
+  "bge_qc.chunk_multiplier": 3,
+  "bge_qc.denials":          "path/to/denials.txt",
+  "bge_qc.aliases":          "path/to/aliases.txt"
 }
 ```
 
-`rename_file` is a TSV with columns: `FINNGENID_finngen(1)`, `FINNGENID_biobank(2)`, `SAMPLE_ID(3)` — samples are renamed from col 3 to col 1. `filter_expression`, `vcf_max_gb`, and `chunk_multiplier` are optional; `denials` and `aliases` are required (see [Sample exclusion](#sample-exclusion-denials--aliases) above).
+`root_name` sets the output filename root (`{root_name}.QC_ANNOTATED.vcf.gz`) — an explicit input, not derived from the raw input VCF's name. `rename_file` is a TSV with columns: `FINNGENID_finngen(1)`, `FINNGENID_biobank(2)`, `SAMPLE_ID(3)` — samples are renamed from col 3 to col 1. `filter_expression`, `vcf_max_gb`, and `chunk_multiplier` are optional; `root_name`, `denials`, and `aliases` are required (see [Sample exclusion](#sample-exclusion-denials--aliases) above).
 
 **Outputs:**
 
@@ -723,23 +769,6 @@ Then globally:
 - `merged_vcf`: `{root_name}.QC_ANNOTATED.vcf.gz` — all chromosomes merged, samples renamed to FinnGen IDs
 - `merged_vcf_tbi`: Index for merged VCF
 - `report`: `{root_name}.QC_ANNOTATED.report.txt` — per-chromosome and total drop rates, plus original/filtered sample counts and samples removed by the denial list
-
-**How to run:**
-
-```bash
-cat > inputs.json << EOF
-{
-  "daly_qc.vcf_list":         "vcf_files.txt",
-  "daly_qc.rename_file":      "rename.tsv",
-  "daly_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
-  "daly_qc.cpu_count":        8,
-  "daly_qc.denials":          "denials.txt",
-  "daly_qc.aliases":          "aliases.txt"
-}
-EOF
-
-java -jar cromwell.jar run wdl/daly_qc.wdl -i inputs.json
-```
 
 ---
 
@@ -772,9 +801,9 @@ All workflows support `test_sample_count` to subset samples for faster testing:
 **CPU Count**
 
 Controls parallelization level:
-- `wes_chrom.wdl`: Number of chunks per chromosome
+- `gnomad_wes_finns.wdl`: Number of chunks per chromosome
 - `single_file_qc.wdl`: Number of chromosomes processed in parallel
-- `daly_qc.wdl`: Number of genomic regions processed in parallel
+- `bge.wdl`: Number of genomic regions processed in parallel
 
 Recommended: 8-16 for most use cases.
 
@@ -786,7 +815,7 @@ Recommended: 8-16 for most use cases.
 
 *Cause:* Overlapping variants between chunks (old behavior with `-R` only)
 
-*Solution:* Use `wes_chrom.wdl` which uses both `-r` and `-T` to ensure no overlaps
+*Solution:* Use `gnomad_wes_finns.wdl` which uses both `-r` and `-T` to ensure no overlaps
 
 **Filter expression errors**
 
@@ -809,5 +838,5 @@ Recommended: 8-16 for most use cases.
 - bcftools (with +setGT and +fill-tags plugins)
 - tabix
 - parallel (GNU parallel)
-- Python 3 with numpy (for position chunking in wes_chrom.wdl)
+- Python 3 with numpy (for position chunking in gnomad_wes_finns.wdl)
 - WDL runtime (Cromwell, miniwdl, etc.)

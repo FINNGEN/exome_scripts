@@ -1,0 +1,8 @@
+{
+    "bge_qc.vcf_list": "gs://fg-3/exome_v2/inputs/bge_qc_files.txt",
+    "bge_qc.root_name": "Blended_Genome_Exome_scizophrenia_bipolar_controls",
+    "bge_qc.filter_expression": "FILTER~'NO_HQ_GENOTYPES'",
+    "bge_qc.rename_file":"gs://fg-3/exome_v2/inputs/bge_rename.txt",
+    "bge_qc.denials": "gs://thl-incoming-data/from_THL_registerteam/denial_lists/finngen_R14_finngenid_exclusion_list.txt",
+    "bge_qc.aliases": "gs://fg-3/exome_v2/inputs/finngen_R14_duplicate_list.txt"
+}
