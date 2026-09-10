@@ -74,6 +74,13 @@ workflow exome_reassign_ids {
     ]
     Int    chunk_mb = 500
     String suffix   = "fg_ids"
+
+    # ---- HWE stage: per-dataset autosomal Hardy-Weinberg summary (runs
+    #      whenever run_rename = true, chained off ConcatChromVCF's output —
+    #      no separate VCF source needed) ----
+    String hwe_plink_conv_args = "--double-id --allow-extra-chr --vcf-half-call h"
+    Int    hwe_mem_gb = 8
+    Int    hwe_cpu    = 4
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
@@ -221,6 +228,50 @@ workflow exome_reassign_ids {
           suffix        = suffix,
           chrom_size_mb = BuildAllRegions.chrom_sizes_mb[i]
       }
+
+      # ---- HWE (autosomes only): chained directly off ConcatChromVCF's own
+      #      output — same renamed VCF, no separate source. disk_gb uses the
+      #      exact size of this specific file (a real task output, sized at
+      #      workflow level so it's never passed into a task as File — see
+      #      exome_hwe.wdl for why that matters on this Cromwell backend). ----
+      Boolean is_autosome = chroms[ch_idx] != "chrX" && chroms[ch_idx] != "chrY"
+
+      if (is_autosome) {
+        Int hwe_disk_gb = ceil(size(ConcatChromVCF.out_vcf, "GB") * 3)
+
+        call VcfToPlink {
+          input:
+            vcf_template    = ConcatChromVCF.out_vcf,   # File coerced to String — no localization
+            plink_conv_args = hwe_plink_conv_args,
+            mem_gb          = hwe_mem_gb,
+            cpu             = hwe_cpu,
+            disk_gb         = hwe_disk_gb
+        }
+
+        call Hardy {
+          input:
+            bed        = VcfToPlink.bed,
+            out_prefix = vcf_pairs[ds_idx][0] + "_" + chroms[ch_idx]
+        }
+      }
+    }
+
+    Array[File] all_hwe_files = select_all(Hardy.hardy)
+    Array[File] all_hwe_beds  = select_all(VcfToPlink.bed)
+    Array[File] all_hwe_bims  = select_all(VcfToPlink.bim)
+    Array[File] all_hwe_fams  = select_all(VcfToPlink.fam)
+
+    # ---- per-dataset HWE gather, long-name output (same derivation as
+    #      exome_hwe.wdl — every VCF here follows "{LongName}.QC_ANNOTATED...") ----
+    scatter (hwe_ds_i in range(length(vcf_pairs))) {
+      String hwe_long_name = sub(basename(vcf_pairs[hwe_ds_i][1], ".vcf.gz"), "\\.QC_ANNOTATED$", "")
+
+      call GatherHardy {
+        input:
+          dataset         = vcf_pairs[hwe_ds_i][0],
+          out_name        = hwe_long_name,
+          all_hardy_files = all_hwe_files
+      }
     }
   }
 
@@ -236,6 +287,12 @@ workflow exome_reassign_ids {
     # ---- optional: rename stage — only present when run_rename = true ----
     Array[File]? chrom_vcfs = ConcatChromVCF.out_vcf
     Array[File]? chrom_tbis = ConcatChromVCF.out_tbi
+
+    # ---- optional: HWE stage — only present when run_rename = true ----
+    Array[File]? dataset_hwe_summaries = GatherHardy.out_tsv
+    Array[File]? hwe_beds              = all_hwe_beds
+    Array[File]? hwe_bims              = all_hwe_bims
+    Array[File]? hwe_fams              = all_hwe_fams
   }
 }
 
@@ -1093,5 +1150,170 @@ task ConcatChromVCF {
   runtime {
     cpu:   cpu
     disks: "local-disk ~{disk_gb} HDD"
+  }
+}
+
+# =========================================================================
+# TASKS — HWE (autosomal Hardy-Weinberg summary, per dataset)
+# Inlined from exome_hwe.wdl (kept as a standalone WDL for isolated testing —
+# see that file's header for the full design rationale). No imports in this
+# file by design, so these are duplicated here rather than shared.
+# =========================================================================
+
+# ── VcfToPlink — VCF (GCS FUSE) → plink bed/bim/fam. vcf_template and
+#    disk_gb are both plain String/Int — no File-typed value anywhere in this
+#    task's scope (input or private declaration). On this Cromwell setup
+#    (GCP Batch backend), any File-typed value used inside a task gets fully
+#    localized regardless of localization_optional or whether it's a formal
+#    input vs. a private declaration, which would defeat the FUSE trick
+#    entirely. disk_gb is computed once at the workflow level instead (see
+#    hwe_disk_gb above), where a File coercion never reaches any task's
+#    localization manifest. ────────────────────────────────────────────────
+task VcfToPlink {
+  input {
+    String vcf_template     # gs://… fully resolved
+    String plink_conv_args
+    Int    mem_gb
+    Int    cpu
+    Int    disk_gb
+    String docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:hwe"
+  }
+
+  String out_prefix    = basename(vcf_template, ".vcf.gz")   # same name as the VCF, for co-located release
+  Int    plink_mem_mb  = if mem_gb > 6 then (mem_gb - 4) * 1024 else 2048
+
+  command <<<
+  set -euo pipefail
+  export GCS_OAUTH_TOKEN=$(gcloud auth application-default print-access-token)
+
+  resolve_fuse() {
+    local fuse
+    fuse=$(echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1" >&2; exit 1; }
+    echo "$fuse"
+  }
+  fuse_path=$(resolve_fuse "~{vcf_template}")
+
+  plink2 \
+    --vcf        "$fuse_path" \
+    --make-bed \
+    --memory     ~{plink_mem_mb} \
+    --threads    ~{cpu} \
+    --out        "~{out_prefix}" \
+    ~{plink_conv_args}
+  >>>
+
+  output {
+    File bed = out_prefix + ".bed"
+    File bim = out_prefix + ".bim"
+    File fam = out_prefix + ".fam"
+    File log = out_prefix + ".log"
+  }
+  runtime {
+    cpu:    cpu
+    memory: mem_gb + " GB"
+    disks:  "local-disk ~{disk_gb} HDD"
+    docker: docker
+  }
+}
+
+# ── Hardy — plink2 --hardy on a plink fileset (FUSE-read, bim/fam derived
+#    from bed's own prefix). ALT_FREQS/OBS_CT are computed by plain
+#    arithmetic on --hardy's own gcounts, not a separate --freq run: plink2
+#    never reorders A1/AX by frequency (unlike plink 1.9), so A1 is REF and
+#    AX is ALT here, and with N = HOM_A1_CT + HET_A1_CT + TWO_AX_CT:
+#      OBS_CT    = 2*N
+#      ALT_FREQS = (2*TWO_AX_CT + HET_A1_CT) / OBS_CT
+#    This also sidesteps a real edge case a --freq join would hit: for a
+#    surviving multiallelic site, --hardy emits one row per biallelic
+#    contrast while --freq's ALT_FREQS is a single comma-joined value per
+#    variant — the two wouldn't line up row-for-row. ─────────────────────────
+task Hardy {
+  input {
+    String bed              # gs://… VcfToPlink.bed — read via FUSE, not localized. bim/fam are
+                             # always same-prefix siblings from the same VcfToPlink call, so
+                             # they're derived below rather than passed as separate inputs.
+    String out_prefix
+    String docker = "eu.gcr.io/finngen-refinery-dev/exome_bioinf:hwe"
+  }
+
+  command <<<
+  set -euo pipefail
+
+  resolve_fuse() {
+    local fuse
+    fuse=$(echo "$1" | sed 's|gs://[^/]*/|/mnt/disks/gcs/|')
+    [[ -f "$fuse" ]] || { echo "ERROR: not found: $1" >&2; exit 1; }
+    echo "$fuse"
+  }
+  bed_path=$(resolve_fuse "~{bed}")
+  bfile_prefix="${bed_path%.bed}"
+
+  plink2 \
+    --bfile "$bfile_prefix" \
+    --hardy \
+    --out "~{out_prefix}"
+
+  awk -F'\t' '
+    NR==1 {
+      for (i=1; i<=NF; i++) {
+        if ($i=="HOM_A1_CT") hom=i
+        if ($i=="HET_A1_CT") het=i
+        if ($i=="TWO_AX_CT") twoax=i
+      }
+      print $0"\tALT_FREQS\tOBS_CT"
+      next
+    }
+    {
+      n   = $hom + $het + $twoax
+      obs = 2*n
+      f   = (obs > 0) ? (2*$twoax + $het) / obs : "NA"
+      print $0"\t"f"\t"obs
+    }
+  ' "~{out_prefix}.hardy" > "~{out_prefix}.hwe.tsv"
+  gzip -f "~{out_prefix}.hwe.tsv"
+  >>>
+
+  output {
+    File hardy = out_prefix + ".hwe.tsv.gz"
+    File log   = out_prefix + ".log"
+  }
+  runtime {
+    docker: docker
+  }
+}
+
+# ── GatherHardy — filters the full flat all_hardy_files array down to one
+#    dataset's per-chrom .hardy files by filename match (out_prefix embeds
+#    "dataset_chrom"), then concatenates them into a single gzipped summary
+#    TSV. dataset (the short token) is only used for the filename-match
+#    filter; out_name (the long descriptive name) names the final output. ───
+task GatherHardy {
+  input {
+    String      dataset
+    String      out_name
+    Array[File] all_hardy_files   # every (dataset, chrom) Hardy output — filtered below
+  }
+
+  command <<<
+  set -euo pipefail
+  grep "/~{dataset}_chr" "~{write_lines(all_hardy_files)}" > my_files.txt
+
+  out="~{out_name}.hwe_summary.tsv"
+  wrote_header=0
+  while read -r f; do
+    if [[ "$wrote_header" -eq 0 ]]; then
+      # process substitution, not a direct pipe: head's early exit would
+      # otherwise SIGPIPE zcat and (under pipefail) kill the script with 141
+      head -1 <(zcat "$f") > "$out"
+      wrote_header=1
+    fi
+    zcat "$f" | tail -n +2 >> "$out"
+  done < my_files.txt
+  gzip -f "$out"
+  >>>
+
+  output {
+    File out_tsv = "~{out_name}.hwe_summary.tsv.gz"
   }
 }
