@@ -15,6 +15,7 @@
     "exome_reassign_ids.aliases": "gs://fg-3/exome_v2/inputs/finngen_R14_duplicate_list.txt",
 
     "exome_reassign_ids.run_rename": true,
+    "exome_reassign_ids.fg_pheno_file": "gs://finngen-production-library-red/finngen_R14/phenotype_1.0/data/finngen_R14_minimum_1.0.txt.gz",
     "exome_reassign_ids.chunk_mb": 1800,
     "exome_reassign_ids.suffix": "fg_ids",
     "exome_reassign_ids.chroms": ["chr1","chr2","chr3","chr4","chr5","chr6","chr7","chr8","chr9","chr10", "chr11","chr12","chr13","chr14","chr15","chr16","chr17","chr18","chr19", "chr20","chr21","chr22","chrX","chrY"]

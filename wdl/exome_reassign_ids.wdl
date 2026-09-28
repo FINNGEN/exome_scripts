@@ -78,9 +78,14 @@ workflow exome_reassign_ids {
     # ---- HWE stage: per-dataset autosomal Hardy-Weinberg summary (runs
     #      whenever run_rename = true, chained off ConcatChromVCF's output —
     #      no separate VCF source needed) ----
-    String hwe_plink_conv_args = "--double-id --allow-extra-chr --vcf-half-call h"
+    # --split-par hg38: chrX PAR (pseudoautosomal) variants otherwise make plink2
+    # refuse the import outright ("Human chrX pseudoautosomal variant(s) appear
+    # to be present ... but --split-par was not specified") — same fix already
+    # used by exome_ld.wdl's VcfToPlink for the identical error.
+    String hwe_plink_conv_args = "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h"
     Int    hwe_mem_gb = 8
     Int    hwe_cpu    = 4
+    File   fg_pheno_file   # finngen_R14_minimum…txt.gz — for --update-sex (chrX needs sex info; see exome_ld.wdl's VcfToPlink)
   }
 
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
@@ -235,19 +240,19 @@ workflow exome_reassign_ids {
       #      workflow level so it's never passed into a task as File — see
       #      exome_hwe.wdl for why that matters on this Cromwell backend). ----
       Boolean is_autosome = chroms[ch_idx] != "chrX" && chroms[ch_idx] != "chrY"
+      Int     hwe_disk_gb = ceil(size(ConcatChromVCF.out_vcf, "GB") * 3)
+
+      call VcfToPlink {
+        input:
+          vcf_template    = ConcatChromVCF.out_vcf,   # File coerced to String — no localization
+          plink_conv_args = hwe_plink_conv_args,
+          fg_pheno_file   = fg_pheno_file,
+          mem_gb          = hwe_mem_gb,
+          cpu             = hwe_cpu,
+          disk_gb         = hwe_disk_gb
+      }
 
       if (is_autosome) {
-        Int hwe_disk_gb = ceil(size(ConcatChromVCF.out_vcf, "GB") * 3)
-
-        call VcfToPlink {
-          input:
-            vcf_template    = ConcatChromVCF.out_vcf,   # File coerced to String — no localization
-            plink_conv_args = hwe_plink_conv_args,
-            mem_gb          = hwe_mem_gb,
-            cpu             = hwe_cpu,
-            disk_gb         = hwe_disk_gb
-        }
-
         call Hardy {
           input:
             bed        = VcfToPlink.bed,
@@ -257,9 +262,9 @@ workflow exome_reassign_ids {
     }
 
     Array[File] all_hwe_files = select_all(Hardy.hardy)
-    Array[File] all_hwe_beds  = select_all(VcfToPlink.bed)
-    Array[File] all_hwe_bims  = select_all(VcfToPlink.bim)
-    Array[File] all_hwe_fams  = select_all(VcfToPlink.fam)
+    Array[File] all_hwe_beds  = VcfToPlink.bed
+    Array[File] all_hwe_bims  = VcfToPlink.bim
+    Array[File] all_hwe_fams  = VcfToPlink.fam
 
     # ---- per-dataset HWE gather, long-name output (same derivation as
     #      exome_hwe.wdl — every VCF here follows "{LongName}.QC_ANNOTATED...") ----
@@ -387,7 +392,7 @@ task FilterVCF {
     String prefix
     File   snplist
     Int    cpu       = 4
-    Int    disk_gb   = 20
+    Int    disk_gb   = 30
   }
 
   String snplist_id = basename(snplist, ".txt")
@@ -1173,6 +1178,8 @@ task VcfToPlink {
   input {
     String vcf_template     # gs://… fully resolved
     String plink_conv_args
+    File   fg_pheno_file    # finngen_R14_minimum…txt.gz — sex column (5th) for --update-sex;
+                             # chrX import fails without sex info (see exome_ld.wdl's VcfToPlink)
     Int    mem_gb
     Int    cpu
     Int    disk_gb
@@ -1194,8 +1201,11 @@ task VcfToPlink {
   }
   fuse_path=$(resolve_fuse "~{vcf_template}")
 
+  zcat -f ~{fg_pheno_file} | awk -F'\t' 'NR>1{sex=($5=="male")?1:($5=="female")?2:0; print $1,$1,sex}' > sex_update.txt
+
   plink2 \
     --vcf        "$fuse_path" \
+    --update-sex sex_update.txt \
     --make-bed \
     --memory     ~{plink_mem_mb} \
     --threads    ~{cpu} \

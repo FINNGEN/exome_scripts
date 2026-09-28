@@ -351,6 +351,52 @@ ConcatChromVCF[D×C]      scatter — selects matching chunks and concatenates
 - `chrom_vcfs[]`: One VCF per dataset × chromosome, samples renamed to FinnGen IDs, filename pattern `{base}.QC_ANNOTATED_{suffix}_{chrom}.vcf.gz`
 - `chrom_tbis[]`: Corresponding index files
 
+### Stage 3 — Hardy-Weinberg equilibrium (optional, runs alongside stage 2)
+
+**Per-dataset autosomal HWE summary, chained directly off stage 2's renamed VCFs**
+
+> Inlined directly in `wdl/exome_reassign_ids.wdl` (formerly `exome_hwe.wdl`, kept as a separate file only for isolated testing — see that file's own header). Also gated by `if (run_rename)`; runs once per dataset × chromosome, right after `ConcatChromVCF` produces that chromosome's renamed VCF — no separate VCF source needed.
+
+**What it does:**
+
+```
+ConcatChromVCF's renamed VCF
+        │
+VcfToPlink[D×C]   converts to plink1 BED via plink2, updates sample sex
+                  from `fg_pheno_file` (--update-sex) and handles chrX PAR
+                  variants (--split-par hg38) — both required or plink2
+                  refuses the import outright
+        │
+Hardy[D×C]        plink2 --hardy, autosomes only (chr1–22); ALT_FREQS/OBS_CT
+                  derived from --hardy's own genotype counts, no separate
+                  --freq run
+        │
+GatherHardy[D]     concatenates all chromosomes for one dataset, in order,
+                  into a single gzipped summary
+```
+
+**Inputs:**
+
+```json
+{
+  "exome_reassign_ids.fg_pheno_file":   "gs://bucket/finngen_R14_minimum_1.0.txt.gz",
+  "exome_reassign_ids.hwe_plink_conv_args": "--double-id --allow-extra-chr --split-par hg38 --vcf-half-call h",
+  "exome_reassign_ids.hwe_mem_gb": 8,
+  "exome_reassign_ids.hwe_cpu":    4
+}
+```
+
+`fg_pheno_file` is required whenever `run_rename = true` — `VcfToPlink` reads its 5th column (`male`/`female`) to build a plink `--update-sex` file. Without it (or without `--split-par` in `hwe_plink_conv_args`), plink2 refuses to import chrX at all:
+```
+Error: Human chrX pseudoautosomal variant(s) appear to be present in the input
+VCF, but --split-par was not specified.
+```
+
+**Outputs:**
+
+- `hwe_beds[]` / `hwe_bims[]` / `hwe_fams[]`: Per-dataset × chromosome plink filesets (autosomes only), same naming as the matching renamed VCF
+- `dataset_hwe_summaries[]`: One gzipped `[EXOME_DATASET].hwe_summary.tsv.gz` per dataset, all autosomal chromosomes concatenated in order
+
 ---
 
 ## LD step
@@ -606,10 +652,28 @@ This repository contains WDL (Workflow Description Language) workflows for proce
 
 1. Optionally subsets samples for testing (if `test_sample_count` is provided)
 2. Computes statistics on original VCFs (variant counts per chromosome)
-3. Pre-filters each VCF (`PreFilter` task):
+3. Pre-filters each VCF (`ParallelPreFilterByRegion` task) using the same
+   position-based chunking described under "Key features" below, applied to
+   this step too:
    - Excludes denied samples (`denials` + `aliases` expansion, see [Sample exclusion](#sample-exclusion-denials--aliases) above)
    - Recalculates AC after exclusion, then removes AC=0 variants (monomorphic sites)
    - Annotates variant IDs as `CHROM_POS_REF_ALT`
+
+   This task used to be a single unbroken stream over the whole chromosome
+   (`PreFilter`). It was rewritten to chunk the same way step 4 already did,
+   after a specific chr19 locus (2,026 VCF records stacked at one position —
+   a repeat-expansion/microsatellite site) was found to deterministically
+   trigger a low-level htslib read failure (`bgzf_read_block` short read)
+   whenever anything read *through* it, whether via one long stream or a
+   chunk whose region happened to span across it. The data itself was
+   confirmed not corrupted (independent byte-level BGZF verification); the
+   fix is a per-chromosome exclusion list
+   (`prefilter_exclude_positions` in the workflow, currently
+   `{"chr19": ["5787204"]}`) — chunking proceeds normally, and only the one
+   chunk whose span would have crossed an excluded position gets sub-split
+   into a before/after pair around it, so no chunk's region ever reads
+   through it. See `CHR19_PREFILTER_INVESTIGATION.md` for the full
+   investigation.
 4. Parallel filters by region using position-based chunking:
    - Splits each chromosome into equal chunks by variant positions
    - **Splits multiallelics** (`bcftools norm -m -any`) and **normalises against reference FASTA** (`bcftools norm -c x`) — done first before any other filters
@@ -830,6 +894,24 @@ Recommended: 8-16 for most use cases.
 **Out of memory errors**
 
 *Solution:* Increase memory in runtime section or reduce `cpu_count` (fewer parallel chunks = less memory)
+
+**`bgzf_read_block` / `BCF read error` on chr19 (`gnomad_wes_finns.wdl`)**
+
+*Cause:* A specific repeat-expansion locus, chr19:5,787,204, has 2,026 VCF records stacked at that single position. Reading through it — via one unbroken stream or any chunk whose region happened to span across it — deterministically triggers a low-level htslib read failure. Confirmed not caused by data corruption (see `CHR19_PREFILTER_INVESTIGATION.md` for the full investigation).
+
+*Solution:* Already fixed — `ParallelPreFilterByRegion` takes a per-chromosome exclusion list (`prefilter_exclude_positions`, currently `{"chr19": ["5787204"]}`) and sub-splits only the one affected chunk around it. If a similar failure shows up on a different chromosome/locus, add it to that map.
+
+**plink2 refuses chrX import (`exome_reassign_ids.wdl` / `exome_ld.wdl`)**
+
+*Symptom:*
+```
+Error: chrX is present in the input file, but no sex information was provided
+Error: Human chrX pseudoautosomal variant(s) appear to be present in the input
+VCF, but --split-par was not specified.
+```
+*Cause:* plink2 requires explicit sex information to correctly handle chrX ploidy, and `--split-par` to handle the pseudoautosomal region.
+
+*Solution:* Already fixed in both `VcfToPlink` tasks — `--update-sex` (from `fg_pheno_file`'s sex column) and `--split-par hg38` (in `plink_conv_args`) are applied by default.
 
 ---
 

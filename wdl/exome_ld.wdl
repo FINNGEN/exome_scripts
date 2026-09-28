@@ -104,7 +104,7 @@ workflow exome_ld {
         plink_conv_args = plink_conv_args,
         mem_gb          = mem_gb,
         cpu             = cpu,
-        disk_gb         = disk_gb
+        disk_gb         = disk_gb + 10
     }
   }
 
