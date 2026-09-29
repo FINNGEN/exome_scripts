@@ -91,6 +91,21 @@ workflow exome_reassign_ids {
   File plink_bim = sub(plink_bed, "\\.bed$", ".bim")
   File plink_fam = sub(plink_bed, "\\.bed$", ".fam")
 
+  # Companion .tbi per vcf_pairs entry, passed as a real File input (not String)
+  # to every task that reads a vcf_pairs VCF directly via the gs://-native/fuse
+  # trick. The VCF itself stays String-typed to avoid localizing multi-GB files,
+  # but the tiny .tbi IS localized and content-hashed by Cromwell — so if a
+  # source VCF is regenerated at the same gs:// path, call caching correctly
+  # detects the change instead of silently cache-hitting on stale data (see
+  # CHR19_PREFILTER_INVESTIGATION.md for the bug this pattern is guarding
+  # against — the renamed_vcf_chr chr19 output was found to still be truncated
+  # at the old bad position because this stage's cache never saw the upstream
+  # fix).
+  scatter (p in vcf_pairs) {
+    String vcf_pairs_tbi_item = p[1] + ".tbi"
+  }
+  Array[String] vcf_pairs_tbis = vcf_pairs_tbi_item
+
   # =====================================================================
   # MANDATORY: kinship / duplicate detection
   # =====================================================================
@@ -113,6 +128,7 @@ workflow exome_reassign_ids {
       input:
         prefix  = vcf_pairs[pair_idx][0],
         vcf     = vcf_pairs[pair_idx][1],
+        vcf_tbi = vcf_pairs_tbis[pair_idx],
         snplist = MakeRegionSnplists.snplists[snplist_idx]
     }
   }
@@ -195,8 +211,9 @@ workflow exome_reassign_ids {
     scatter (chrom in chroms) {
       call QueryChromPositions {
         input:
-          chrom     = chrom,
-          vcf_pairs = vcf_pairs
+          chrom          = chrom,
+          vcf_pairs      = vcf_pairs,
+          vcf_pairs_tbis = vcf_pairs_tbis
       }
     }
 
@@ -204,6 +221,7 @@ workflow exome_reassign_ids {
       input:
         position_files = flatten(QueryChromPositions.positions),
         vcf_pairs      = vcf_pairs,
+        vcf_pairs_tbis = vcf_pairs_tbis,
         chroms         = chroms,
         chunk_mb       = chunk_mb
     }
@@ -212,6 +230,7 @@ workflow exome_reassign_ids {
       call SubsetChunk {
         input:
           vcf              = BuildAllRegions.tasks[i][0],
+          vcf_tbi          = BuildAllRegions.tasks[i][0] + ".tbi",
           prefix           = BuildAllRegions.tasks[i][1],
           region           = BuildAllRegions.tasks[i][2],
           resolved_mapping = GatherResults.id_mapping,
@@ -389,6 +408,7 @@ task MakeRegionSnplists {
 task FilterVCF {
   input {
     String vcf
+    File   vcf_tbi   # unused in command; forces cache-busting on content change — see workflow-level vcf_pairs_tbis
     String prefix
     File   snplist
     Int    cpu       = 4
@@ -938,12 +958,14 @@ task QueryChromPositions {
   input {
     String               chrom
     Array[Array[String]] vcf_pairs
+    Array[File]          vcf_pairs_tbis   # unused in command; forces cache-busting on content change — see workflow-level vcf_pairs_tbis
     Int                  cpu     = 4
     Int                  disk_gb = 10
   }
 
   command <<<
   set -euo pipefail
+  echo "cache call override"
 
   while IFS=$'\t' read -r dataset vcf; do
     echo "export GCS_OAUTH_TOKEN=\$(gcloud auth application-default print-access-token) && bcftools query -f '%POS\n' --regions ~{chrom} \"$vcf\" > ${dataset}_~{chrom}_pos.txt"
@@ -977,6 +999,7 @@ task BuildAllRegions {
   input {
     Array[File]          position_files
     Array[Array[String]] vcf_pairs
+    Array[File]          vcf_pairs_tbis   # unused in command; forces cache-busting on content change — see workflow-level vcf_pairs_tbis
     Array[String]        chroms
     Int                  chunk_mb
   }
@@ -1056,6 +1079,7 @@ task BuildAllRegions {
 task SubsetChunk {
   input {
     String vcf
+    File   vcf_tbi   # unused in command; forces cache-busting on content change — see workflow-level vcf_pairs_tbis
     String prefix
     String region
     File   resolved_mapping

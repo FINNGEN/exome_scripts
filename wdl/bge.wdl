@@ -29,13 +29,19 @@ workflow bge_qc {
 
   scatter (vcf in vcfs) {
 
+    # Companion .tbi for the raw source vcf, passed as a real File input (not
+    # String) to every task that reads it directly via the fuse trick — see the
+    # same pattern in gnomad_wes_finns.wdl/ComputeStats for why.
+    String vcf_tbi = vcf + ".tbi"
+
     call ComputeStats {
-      input: vcf = vcf
+      input: vcf = vcf, vcf_tbi = vcf_tbi
     }
 
     call AnnotateAndRename {
       input:
         vcf         = vcf,
+        vcf_tbi     = vcf_tbi,
         rename_file = rename_file,
         cpu_count   = cpu_count,
         vcf_max_gb  = vcf_max_gb
@@ -44,6 +50,7 @@ workflow bge_qc {
     call ParallelFilter {
       input:
         input_vcf          = AnnotateAndRename.output_vcf + "",
+        input_vcf_tbi      = AnnotateAndRename.output_vcf_tbi,
         filter_expression  = filter_expression,
         cpu_count          = cpu_count,
         vcf_max_gb         = vcf_max_gb,
@@ -52,13 +59,14 @@ workflow bge_qc {
     }
 
     call ComputeStats as FilteredStats {
-      input: vcf = ParallelFilter.filtered_vcf + ""
+      input: vcf = ParallelFilter.filtered_vcf + "", vcf_tbi = ParallelFilter.filtered_vcf_tbi
     }
 
     call ValidateFiltering {
       input:
         original_vcf      = vcf,
         filtered_vcf      = ParallelFilter.filtered_vcf + "",
+        filtered_vcf_tbi  = ParallelFilter.filtered_vcf_tbi,
         original_stats    = ComputeStats.stats,
         filtered_stats    = FilteredStats.stats,
         rename_report     = AnnotateAndRename.rename_report,
@@ -76,6 +84,7 @@ workflow bge_qc {
   call SortAndMerge {
     input:
       vcf_files      = ParallelFilter.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
+      vcf_file_tbis  = ParallelFilter.filtered_vcf_tbi,
       summary_report = SummaryStats.report,
       root_name      = root_name,                     # explicit output root — not derived from the raw input VCF's name
       cpu_count      = cpu_count
@@ -98,6 +107,7 @@ workflow bge_qc {
 task ComputeStats {
   input {
     String vcf
+    File   vcf_tbi   # unused in command; forces cache-busting on content change — see workflow-level vcf_tbi
   }
 
   command <<<
@@ -141,6 +151,7 @@ task ComputeStats {
 task AnnotateAndRename {
   input {
     String vcf
+    File   vcf_tbi   # unused in command; forces cache-busting on content change — see workflow-level vcf_tbi
     File   rename_file
     Int    cpu_count  = 8
     Int    vcf_max_gb = 25
@@ -307,6 +318,7 @@ PY
 task ParallelFilter {
   input {
     String input_vcf
+    File   input_vcf_tbi   # unused in command; forces cache-busting on content change — see ComputeStats
     String filter_expression
     File   denials    # sample IDs to remove, one per line
     Int    cpu_count        = 8
@@ -385,6 +397,7 @@ task ValidateFiltering {
   input {
     String original_vcf
     String filtered_vcf
+    File   filtered_vcf_tbi   # unused in command; forces cache-busting on content change — see ComputeStats
     File   original_stats
     File   filtered_stats
     File   rename_report
@@ -531,6 +544,7 @@ task SummaryStats {
 task SortAndMerge {
   input {
     Array[String] vcf_files   # Array[File] coerced to Array[String] at call site — no localisation
+    Array[File]   vcf_file_tbis   # unused in command; forces cache-busting on content change — see ComputeStats
     File          summary_report
     String        root_name
     Int           cpu_count = 8

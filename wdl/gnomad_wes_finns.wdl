@@ -45,6 +45,7 @@ workflow gnomad_wes_finns_chrom {
       call SubsetSamples {
         input:
           input_vcf = vcf,
+          input_vcf_tbi = vcf + ".tbi",
           sample_count = select_first([test_sample_count])
       }
     }
@@ -52,6 +53,17 @@ workflow gnomad_wes_finns_chrom {
     String vcf_to_filter = if defined(SubsetSamples.subset_vcf)
                             then select_first([SubsetSamples.subset_vcf]) + ""
                             else vcf
+
+    # Companion .tbi for vcf_to_filter, passed as a real File input (not String)
+    # to every downstream task that reads vcf_to_filter via the fuse/gs:// trick.
+    # The VCF itself stays String-typed (avoiding multi-GB localization), but the
+    # tiny .tbi IS localized and content-hashed by Cromwell — so if the source
+    # VCF is ever regenerated (new .tbi, same gs:// path), call caching correctly
+    # detects the change and reruns, instead of silently cache-hitting on stale
+    # data the way the chr19 truncation bug did.
+    String vcf_to_filter_tbi = if defined(SubsetSamples.subset_vcf_tbi)
+                                then select_first([SubsetSamples.subset_vcf_tbi]) + ""
+                                else vcf + ".tbi"
 
     # Chrom name pulled from the filename (e.g. ..._chr19.vcf.gz -> "chr19"), used
     # only to look up prefilter_exclude_positions above — not a File/task input, so
@@ -64,6 +76,7 @@ workflow gnomad_wes_finns_chrom {
     call ComputeStats as OriginalStats {
       input:
         input_vcf = vcf_to_filter,
+        input_vcf_tbi = vcf_to_filter_tbi,
         cpu_count = cpu_count
     }
 
@@ -81,6 +94,7 @@ workflow gnomad_wes_finns_chrom {
     call ParallelPreFilterByRegion {
       input:
         input_vcf = vcf_to_filter,
+        input_vcf_tbi = vcf_to_filter_tbi,
         positions = OriginalStats.positions,
         denials = ExpandDenials.expanded_denials,
         exclude_positions = write_lines(chrom_exclude_positions),
@@ -91,6 +105,7 @@ workflow gnomad_wes_finns_chrom {
     call ParallelFilterByRegion {
       input:
         input_vcf = ParallelPreFilterByRegion.prefiltered_vcf + "",
+        input_vcf_tbi = ParallelPreFilterByRegion.prefiltered_vcf_tbi,
         positions = OriginalStats.positions,
         genotype_filter = genotype_filter,
         variant_filter = variant_filter,
@@ -102,6 +117,7 @@ workflow gnomad_wes_finns_chrom {
     call ComputeStats as FilteredStats {
       input:
         input_vcf = ParallelFilterByRegion.filtered_vcf + "",
+        input_vcf_tbi = ParallelFilterByRegion.filtered_vcf_tbi,
         cpu_count = cpu_count
     }
     
@@ -129,6 +145,7 @@ workflow gnomad_wes_finns_chrom {
   call ConcatVcfs {
     input:
       input_vcfs = ParallelFilterByRegion.filtered_vcf,   # Array[File] coerced to Array[String] — no localisation
+      input_vcf_tbis = ParallelFilterByRegion.filtered_vcf_tbi,
       summary_report = SummaryStats.report,
       root_name = root_name,   # explicit output root — not derived from the raw input VCF's name
       disk_gb = ceil(size(ParallelFilterByRegion.filtered_vcf, "GB")) + 20
@@ -149,6 +166,9 @@ workflow gnomad_wes_finns_chrom {
 task ComputeStats {
   input {
     String input_vcf
+    File input_vcf_tbi   # unused in command; declared File so Cromwell localizes and
+                          # content-hashes it, busting call cache when input_vcf's
+                          # underlying GCS content changes but its path doesn't
     Int cpu_count = 8
     Int disk_gb = 20
   }
@@ -320,6 +340,7 @@ PY
 task ParallelPreFilterByRegion {
   input {
     String input_vcf
+    File input_vcf_tbi   # unused in command; forces cache-busting on content change — see ComputeStats
     File positions
     File denials    # sample IDs to remove, one per line
     File exclude_positions    # positions to skip entirely, one per line (may be empty)
@@ -470,6 +491,7 @@ EOF
 task ParallelFilterByRegion {
   input {
     String input_vcf
+    File input_vcf_tbi   # unused in command; forces cache-busting on content change — see ComputeStats
     File positions
     String genotype_filter
     String variant_filter
@@ -697,6 +719,7 @@ task ValidateFiltering {
 task SubsetSamples {
   input {
     String input_vcf
+    File input_vcf_tbi   # unused in command; forces cache-busting on content change — see ComputeStats
     Int sample_count
     Int disk_gb = 50
   }
@@ -747,6 +770,7 @@ task SubsetSamples {
 task ConcatVcfs {
   input {
     Array[String] input_vcfs   # Array[File] coerced to Array[String] at call site — no localisation
+    Array[File] input_vcf_tbis # unused in command; forces cache-busting on content change — see ComputeStats
     File summary_report
     String root_name
     Int disk_gb

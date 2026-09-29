@@ -48,6 +48,10 @@ workflow exome_ld {
   call BuildFgRegions {
     input:
       fg_vcf_template      = fg_vcf_template,
+      # unused in command; real File so Cromwell content-hashes it, busting call
+      # cache if the raw FG source is regenerated at the same gs:// path — see
+      # ComputeStats in gnomad_wes_finns.wdl for the same pattern.
+      fg_vcf_first_chrom_tbi = sub(fg_vcf_template, "CHROM", chroms[0]) + ".tbi",
       exome_vcf_pairs      = exome_vcf_pairs,
       positions_bim        = positions_bim,
       chroms               = chroms,
@@ -59,6 +63,7 @@ workflow exome_ld {
     call SubsetFgChunk {
       input:
         fg_vcf       = BuildFgRegions.tasks[i][0],
+        fg_vcf_tbi   = BuildFgRegions.tasks[i][0] + ".tbi",
         chunk_prefix = BuildFgRegions.tasks[i][1],
         region       = BuildFgRegions.tasks[i][2],
         samples      = BuildFgRegions.union_samples,
@@ -79,6 +84,7 @@ workflow exome_ld {
     call VcfToPlink as FGtoPlink {
       input:
         vcf_template    = ConcatFgChrom.vcf,   # File coerced to String — no localisation
+        vcf_template_tbi = ConcatFgChrom.tbi,
         out_prefix      = "fg_chr" + chroms[ci],
         fg_pheno_file   = fg_pheno_file,
         plink_conv_args = plink_conv_args,
@@ -92,12 +98,14 @@ workflow exome_ld {
   scatter (i in range(length(exome_vcf_pairs) * length(chroms))) {
     Int vcf_i   = i / length(chroms)
     Int chrom_i = i % length(chroms)
+    String exome_vcf_resolved = sub(exome_vcf_pairs[vcf_i][1], "CHROM",
+                                    if chroms[chrom_i] == "23" then "X"
+                                    else if chroms[chrom_i] == "24" then "Y"
+                                    else chroms[chrom_i])
     call VcfToPlink as ExomeToPlink {
       input:
-        vcf_template    = sub(exome_vcf_pairs[vcf_i][1], "CHROM",
-                              if chroms[chrom_i] == "23" then "X"
-                              else if chroms[chrom_i] == "24" then "Y"
-                              else chroms[chrom_i]),
+        vcf_template    = exome_vcf_resolved,
+        vcf_template_tbi = exome_vcf_resolved + ".tbi",
         out_prefix      = exome_vcf_pairs[vcf_i][0] + "_chr" + chroms[chrom_i],
         exclude_bim     = FGtoPlink.bim[chrom_i],
         fg_pheno_file   = fg_pheno_file,
@@ -198,6 +206,7 @@ workflow exome_ld {
 task BuildFgRegions {
   input {
     String               fg_vcf_template
+    File                 fg_vcf_first_chrom_tbi   # unused in command; forces cache-busting on content change
     Array[Array[String]] exome_vcf_pairs
     File                 positions_bim
     Array[String]        chroms
@@ -295,6 +304,7 @@ task BuildFgRegions {
 task SubsetFgChunk {
   input {
     String fg_vcf
+    File   fg_vcf_tbi   # unused in command; forces cache-busting on content change
     String chunk_prefix
     String region
     File   samples
@@ -382,6 +392,7 @@ task ConcatFgChrom {
 task VcfToPlink {
   input {
     String        vcf_template     # gs://… fully resolved (no CHROM placeholder)
+    File          vcf_template_tbi # unused in command; forces cache-busting on content change
     String        out_prefix
     File?         exclude_bim
     File          fg_pheno_file
