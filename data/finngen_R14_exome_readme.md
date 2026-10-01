@@ -157,7 +157,7 @@ One row per variant, autosomes only. Columns:
 | File | Description |
 |---|---|
 | `[EXOME_DATASET].QC_ANNOTATED.report.txt` | Per-dataset QC filtering statistics by chromosome |
-| `hwe/[EXOME_DATASET].hwe_summary.tsv.gz` | Per-dataset Hardy-Weinberg equilibrium + allele frequency summary, autosomes only |
+| `[EXOME_DATASET].hwe_summary.tsv.gz` | Per-dataset Hardy-Weinberg equilibrium + allele frequency summary, autosomes only |
 
 #### Figures
 

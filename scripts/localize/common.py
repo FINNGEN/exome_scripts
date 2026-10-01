@@ -129,6 +129,8 @@ def build_commands(outputs, mapping, data_base):
             commands.append(f"gcloud storage cp {value} {dest_dir}{fixed_name}")
             dest_basenames.setdefault(dest_dir, {}).setdefault(fixed_name, []).append(suffix)
         else:
+            # count shards, not files: a nested output has N files per shard
+            n_shards = len([s for s in value if s]) if isinstance(value, list) else 1
             if nested:
                 value = flatten(value)
             elif not isinstance(value, list):
@@ -138,7 +140,7 @@ def build_commands(outputs, mapping, data_base):
                 print(f"# WARNING: {suffix} present but empty — nothing to copy", file=sys.stderr)
                 continue
 
-            dest_counts.setdefault(dest_dir, {})[suffix] = len(value)
+            dest_counts.setdefault(dest_dir, {})[suffix] = n_shards
             for v in value:
                 base = v.rsplit("/", 1)[-1]
                 dest_basenames.setdefault(dest_dir, {}).setdefault(base, []).append(suffix)

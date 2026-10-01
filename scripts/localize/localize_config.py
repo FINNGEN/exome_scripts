@@ -64,7 +64,7 @@ WORKFLOWS = {
         ("hwe_beds",               "data/renamed_plink_chr", None, False),
         ("hwe_bims",               "data/renamed_plink_chr", None, False),
         ("hwe_fams",               "data/renamed_plink_chr", None, False),
-        ("dataset_hwe_summaries",  "documentation/hwe",      None, False),
+        ("dataset_hwe_summaries",  "documentation",          None, False),
         # combined_summary/combined_plot/id_mapping_stats/id_mapping_md/
         # id_mapping_flowchart go to this repo's own data/ folder for
         # documentation, not to the release bucket — intentionally omitted.
