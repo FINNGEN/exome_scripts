@@ -1,0 +1,11 @@
+{
+    "exome_ld.exome_beds": "gs://fg-3/exome/inputs/ld/exome_beds.txt",
+    "exome_ld.finngen_vcfs": "gs://fg-3/exome/inputs/ld/finngen_vcfs.txt",
+
+    "exome_ld.filter_fg_plink.min_pheno": "gs://finngen-production-library-red/finngen_R12/phenotype_1.0/data/finngen_R12_minimum_1.0.txt.gz",
+
+    "exome_ld.filter_fg_plink.pargs": " --double-id --allow-extra-chr --max-alleles 2  ",
+    "exome_ld.ld.ld_params" : "--ld-window-kb 1000 --ld-window-r2 0.1 ",
+}
+
+

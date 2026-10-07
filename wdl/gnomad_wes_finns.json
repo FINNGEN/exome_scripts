@@ -1,0 +1,12 @@
+{
+    "gnomad_wes_finns_chrom.cpu_count": 8,
+    "gnomad_wes_finns_chrom.vcf_list":"gs://fg-3/exome_v2/inputs/gnomad_wes_finns_vcfs.txt",
+    "gnomad_wes_finns_chrom.root_name": "gnomAD_v4_Finns_subset",
+    "gnomad_wes_finns_chrom.genotype_filter":  "FORMAT/DP<10 | FORMAT/GQ<20",
+    "gnomad_wes_finns_chrom.variant_filter": "AC>0 & ALT!=\"*\"",
+    #"gnomad_wes_finns_chrom.test_sample_count": 100
+    "gnomad_wes_finns_chrom.norm_fasta": "gs://juham-fg/lift/broad/Homo_sapiens_assembly38.fasta",
+    "gnomad_wes_finns_chrom.denials": "gs://thl-incoming-data/from_THL_registerteam/denial_lists/finngen_R14_finngenid_exclusion_list.txt",
+    "gnomad_wes_finns_chrom.aliases": "gs://fg-3/exome_v2/inputs/finngen_R14_duplicate_list.txt"
+
+}

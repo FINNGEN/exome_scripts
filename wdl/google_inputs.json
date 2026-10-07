@@ -1,11 +1,15 @@
 {
     "google_labels":{
-        "project":"finngen3",
+        "project":"fg-3",
         "product":"exome"
     }
     ,
     "default_runtime_attributes": {
-	"docker": "eu.gcr.io/finngen-refinery-dev/convert_vcf:exome",
-    	"zones": "europe-west1-b europe-west1-c europe-west1-d"
+	"docker": "eu.gcr.io/finngen-refinery-dev/exome_bioinf:bcftools-latest",
+    	"zones": "europe-west1-b europe-west1-c europe-west1-d",
+	"memory": "4 GB",
+	"cpu": 2,
+	"disks": "local-disk 10 HDD",
+	"preemptible": 1
     }
 }
